@@ -15,7 +15,7 @@
 /ask
 /pipeline
 /stream
-/gocode
+/luft
 
 # Test binary, built with `go test -c`
 *.test
@@ -39,4 +39,7 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
-bin/gocode
+bin/
+
+# macOS Finder metadata
+.DS_Store
