@@ -15,7 +15,7 @@ What's included:
 - `Ask` / `AskStream` for model calls, `Loop` / `LoopStream` for tool-using loops
 - `Extract[T]` for typed structured output (with or without intermediate tool use)
 - plain `[]Message` history and normal Go functions as tools
-- providers for Anthropic, OpenAI, and OpenRouter
+- providers for Anthropic, OpenAI, OpenRouter, AWS Bedrock (Converse), and Vertex AI Gemini
 - typed tools, schema helpers, toolsets, middleware, context management, MCP, a thin `Agent` block
 - safe built-in tools (clock, math, sandboxed workspace)
 - session persistence with a five-method `Store` interface
@@ -87,7 +87,7 @@ type Provider interface {
 }
 ~~~
 
-Anthropic, OpenAI Chat Completions, OpenAI Responses, and OpenRouter are included. Any backend can implement the interface.
+Anthropic, OpenAI Chat Completions, OpenAI Responses, OpenRouter, AWS Bedrock (Converse / ConverseStream), and Vertex AI Gemini are included. Any backend can implement the interface.
 
 ### `Client`
 
