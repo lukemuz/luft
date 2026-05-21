@@ -1,26 +1,28 @@
 # luft
 
-A small Go library for LLM calls, tools, and agent loops.
+Build LLM agents in Go.
 
-> Plain data. Plain functions. No framework magic.
+> Agent code that reads like Go.
 >
-> You own the data. You own the tools. You own the loop.
+> No YAML. No graph runtime. No hidden control flow. Ships as one static binary.
 
-`luft` scales from one model call to practical tool-using assistants without forcing a framework-shaped runtime onto simple programs.
+`luft` is a small set of primitives — `Client`, `Provider`, `Message`, `Tool`, `Loop`, `Agent` — composed with ordinary Go. Reading the code tells you what runs. Deploying it is `go build`.
 
-It gives you:
+It scales from a one-line model call to a production tool-using agent to its own coding CLI, without forcing a framework shape onto either end.
 
-- `Ask` and `AskStream` for model calls
-- `Loop` and `LoopStream` for tool-using loops
+What's included:
+
+- `Ask` / `AskStream` for model calls, `Loop` / `LoopStream` for tool-using loops
 - `Extract[T]` for typed structured output (with or without intermediate tool use)
 - plain `[]Message` history and normal Go functions as tools
 - providers for Anthropic, OpenAI, and OpenRouter
-- typed tools, schema helpers, toolsets, middleware, context management, MCP, and a thin `Agent` block
+- typed tools, schema helpers, toolsets, middleware, context management, MCP, a thin `Agent` block
 - safe built-in tools (clock, math, sandboxed workspace)
 - session persistence with a five-method `Store` interface
-- retries, typed errors, streaming, usage tracking
+- structured `Recorder` events for observability (JSONL, in-memory, session-attached)
+- retries, typed errors, streaming, usage tracking, prompt caching
 
-Requires Go 1.21+. No external dependencies in the core package.
+Requires Go 1.21+. **Zero external dependencies** in the core package — the entire library compiles against the standard library.
 
 ## Install
 
@@ -59,6 +61,18 @@ fmt.Println(luft.TextContent(reply))
 No hidden session. No runner. `history` is just data.
 
 For a step-by-step walkthrough see [`QUICKSTART.md`](QUICKSTART.md). For the design philosophy see [`VISION.md`](VISION.md). For an honest comparison with Google's ADK see [`COMPARISON.md`](COMPARISON.md).
+
+## The largest worked example: a coding CLI
+
+The repo ships [`cmd/luft`](cmd/luft) — a Claude Code-style coding agent built on luft. Sandboxed workspace tools, a bash tool with configurable safety modes, explore/plan subagents on cheaper models, project memory loaded from `AGENTS.md` / `CLAUDE.md`, JSONL session logging, slash commands. The whole thing is plain Go using the same primitives documented below.
+
+~~~bash
+go install github.com/lukemuz/luft/cmd/luft@latest
+export OPENROUTER_API_KEY=sk-or-...
+cd ~/your-project && luft
+~~~
+
+It's both a useful tool and the strongest argument for the library: the source for a real coding agent is small enough to read in one sitting. See [`cmd/luft/README.md`](cmd/luft/README.md) for full docs.
 
 ## Core building blocks
 
@@ -348,6 +362,22 @@ sb := luft.NewStreamBuffer(
 client, _ := luft.New(luft.Config{..., Retry: luft.RetryConfig{OnRetry: sb.OnRetry}})
 msg, _, err := client.AskStream(ctx, system, history, sb.OnToken)
 ~~~
+
+## Observability
+
+Every model request, response, retry, and tool dispatch goes through `Recorder` — a single-method interface that receives structured `Event`s (`turn_start`, `model_request`, `model_response`, `tool_call_start`, `tool_call_end`, `retry_attempt`, `turn_end`, `turn_error`).
+
+~~~go
+client, _ := luft.New(luft.Config{
+    Provider: provider,
+    Model:    luft.ModelSonnet,
+    Recorder: luft.NewJSONLRecorder(os.Stdout),
+})
+~~~
+
+Built-ins: `JSONLRecorder` (one JSON object per line, append-safe), `MemoryRecorder` (collect for tests or replay), `MultiRecorder` (fan out), `RecorderToSession` (attach events to a `Session` for persistence). Implement the one-method interface to bridge OpenTelemetry, Datadog, Honeycomb, or anything else.
+
+Events carry a stable `TurnID`, a 0-based `Iter` per model call, and a monotonic `Seq`. Tool events from one parallel batch share `Iter` and order by `Seq`, so reconstruction is unambiguous. The coding CLI exposes this via `luft -log auto`, which writes a JSONL trace of the entire session — main agent and subagents — for debugging.
 
 ## Sessions
 
