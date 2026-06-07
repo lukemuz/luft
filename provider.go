@@ -74,6 +74,8 @@ type ProviderResponse struct {
 //	openai.Provider                ✓        ✓     —         ✓          ✓
 //	openai.ResponsesProvider       ✓        ✓     —         —          —
 //	openrouter.Provider            ✓        ✓     —         ✓          ✓
+//	bedrock.Provider               ✓        ✓     —         ✓          —
+//	vertex.Provider                ✓        ✓     ✓         ✓          ✓
 type GenerationParams struct {
 	// Temperature controls sampling randomness; nil uses the provider default.
 	Temperature *float64

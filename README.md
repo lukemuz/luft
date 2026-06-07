@@ -8,7 +8,7 @@ A small Go library for LLM calls, tools, and agent loops — and a CLI coding ag
 
 `luft` scales from one model call to practical tool-using assistants without forcing a framework-shaped runtime onto simple programs.
 
-Most agent toolkits are frameworks: a runner owns the loop, a session service owns your state, and you assemble behavior through callbacks and services. `luft` is a library instead — history is a `[]Message` you hold, tools are plain Go functions, and the loop is a function you call, so you can always see what's in the context and when the model runs. If you want managed deployment, a vector-backed memory service, or live audio out of the box, a full framework like Google's ADK fits better; `luft` is for when you'd rather read Go than learn a runtime.
+Most agent toolkits are frameworks: a runner owns the loop, a session service owns your state, and you assemble behavior through callbacks and services. `luft` is a library instead — history is a `[]Message` you hold, tools are plain Go functions, and the loop is a function you call, so you can always see what's in the context and when the model runs. If you want managed deployment, a vector-backed memory service, or live audio out of the box, a full framework like Google's ADK fits better; `luft` is for when you'd rather read Go than learn a runtime — and ship your agent as a single static binary.
 
 It gives you:
 
@@ -16,13 +16,13 @@ It gives you:
 - `Loop` and `LoopStream` for tool-using loops
 - `Extract[T]` for typed structured output (with or without intermediate tool use)
 - plain `[]Message` history and normal Go functions as tools
-- providers for Anthropic, OpenAI, and OpenRouter
+- providers for Anthropic, OpenAI, OpenRouter, AWS Bedrock (Converse), and Vertex AI Gemini
 - typed tools, schema helpers, toolsets, middleware, context management, MCP, and a thin `Agent` block
 - safe built-in tools (clock, math, sandboxed workspace)
 - session persistence with a five-method `Store` interface
 - retries, typed errors, streaming, usage tracking
 
-Requires Go 1.21+. No external dependencies in the core package.
+Requires Go 1.21+. The core package has zero external dependencies — every provider (including AWS Bedrock and Vertex AI, whose request signing and auth are written from scratch against the standard library) compiles into your program, so an agent built with `luft` ships as a single static binary: `go build` and deploy it, no runtime or dependency tree to provision.
 
 ## Install
 
@@ -87,7 +87,7 @@ type Provider interface {
 }
 ~~~
 
-Anthropic, OpenAI Chat Completions, OpenAI Responses, and OpenRouter are included. Any backend can implement the interface.
+Anthropic, OpenAI Chat Completions, OpenAI Responses, OpenRouter, AWS Bedrock (Converse / ConverseStream), and Vertex AI Gemini are included. Any backend can implement the interface.
 
 ### `Client`
 
@@ -322,6 +322,8 @@ client, _ := luft.New(luft.Config{
 | `openai.Provider` | ✓ | ✓ | — | ✓ | ✓ |
 | `openai.ResponsesProvider` | ✓ | ✓ | — | — | — |
 | `openrouter.Provider` | ✓ | ✓ | — | ✓ | ✓ |
+| `bedrock.Provider` | ✓ | ✓ | — | ✓ | — |
+| `vertex.Provider` | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ## Prompt caching
 
@@ -386,6 +388,22 @@ sb := luft.NewStreamBuffer(
 client, _ := luft.New(luft.Config{..., Retry: luft.RetryConfig{OnRetry: sb.OnRetry}})
 msg, _, err := client.AskStream(ctx, system, history, sb.OnToken)
 ~~~
+
+## Observability
+
+Every model request, response, retry, and tool dispatch inside `Loop` / `LoopStream` / `Agent.Step` flows through `Recorder` — a one-method interface (`Record(ctx, Event)`) that receives structured `Event`s: `turn_start`, `model_request`, `model_response`, `tool_call_start`, `tool_call_end`, `retry_attempt`, `turn_end`, `turn_error`.
+
+~~~go
+client, _ := luft.New(luft.Config{
+    Provider: provider,
+    Model:    luft.ModelSonnet,
+    Recorder: luft.NewJSONLRecorder(os.Stdout),
+})
+~~~
+
+Built-ins: `JSONLRecorder` (one JSON object per line, append-safe), `MemoryRecorder` (collect for tests or replay), `MultiRecorder` (a `[]Recorder` that fans out), and `RecorderToSession` (append events onto a `Session` so they persist next to `History`). Implement the one-method interface to bridge OpenTelemetry, Datadog, or anything else.
+
+Each `Event` carries a stable `TurnID`, a 0-based `Iter` per model call, and a monotonic `Seq` assigned by the recorder — so tool events from one parallel batch (which share an `Iter`) still order unambiguously by `Seq`. The coding CLI surfaces all of this via `luft -log auto`, which writes a JSONL trace of an entire session (main agent and subagents) for debugging. (`Ask` / `AskStream` make a single call and do not emit events.)
 
 ## Sessions
 
