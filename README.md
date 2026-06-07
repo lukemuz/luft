@@ -1,12 +1,14 @@
 # luft
 
-A small Go library for LLM calls, tools, and agent loops.
+A small Go library for LLM calls, tools, and agent loops — and a CLI coding agent built on top of it.
 
 > Plain data. Plain functions. No framework magic.
 >
-> You own the data. You own the tools. You own the loop.
+> A library, not a framework. Read the code, not the manual.
 
 `luft` scales from one model call to practical tool-using assistants without forcing a framework-shaped runtime onto simple programs.
+
+Most agent toolkits are frameworks: a runner owns the loop, a session service owns your state, and you assemble behavior through callbacks and services. `luft` is a library instead — history is a `[]Message` you hold, tools are plain Go functions, and the loop is a function you call, so you can always see what's in the context and when the model runs. If you want managed deployment, a vector-backed memory service, or live audio out of the box, a full framework like Google's ADK fits better; `luft` is for when you'd rather read Go than learn a runtime.
 
 It gives you:
 
@@ -58,7 +60,19 @@ fmt.Println(luft.TextContent(reply))
 
 No hidden session. No runner. `history` is just data.
 
-For a step-by-step walkthrough see [`QUICKSTART.md`](QUICKSTART.md). For the design philosophy see [`VISION.md`](VISION.md). For an honest comparison with Google's ADK see [`COMPARISON.md`](COMPARISON.md).
+For a step-by-step walkthrough see [`QUICKSTART.md`](QUICKSTART.md). For the design philosophy see [`VISION.md`](VISION.md).
+
+## The luft CLI — a coding agent built on this library
+
+The repo ships more than a library. `cmd/luft` is a fast, low-cost CLI coding agent — a Claude Code-style assistant with read-only workspace tools, sandboxed bash, an editor, and `explore`/`plan` subagents on cheaper models. It is a real tool, and it is the library's largest dogfooding test: every part of it is built from the primitives documented below.
+
+~~~bash
+go install github.com/lukemuz/luft/cmd/luft@latest
+export OPENROUTER_API_KEY=sk-or-...
+cd ~/your-project && luft
+~~~
+
+Full usage — models, flags, bash safety modes, subagents, prompt caching, and project memory — is in [`cmd/luft/README.md`](cmd/luft/README.md).
 
 ## Core building blocks
 
@@ -284,6 +298,30 @@ toolset := luft.Tools(bash).Wrap(luft.WithConfirmation(promptUser))
 Tools and `ProviderTool`s are tagged for one provider; passing them to a different one fails at request build with a clear error.
 
 **OpenAI: Chat Completions vs. Responses.** Hosted tools (`web_search`, `file_search`, `code_interpreter`, `image_generation`) live on `/v1/responses`, not `/v1/chat/completions`. Use `openai.NewResponsesClientFromEnv(model)` (or build one from `openai.NewResponsesProvider`) when you want them. Plain function calling works on both endpoints; OpenAI has signaled Responses as the path forward, so prefer it for new code.
+
+## Generation controls
+
+`GenerationParams` threads optional sampling controls onto every call — set them once on `Config` (they ride through `Ask`, `Loop`, `Agent`, and `Extract`). Pointer fields mean the zero value leaves the provider default untouched, so `temperature: 0` (deterministic) stays distinct from "unset":
+
+~~~go
+client, _ := luft.New(luft.Config{
+    Provider:   provider,
+    Model:      luft.ModelSonnet,
+    Generation: luft.GenerationParams{
+        Temperature:   luft.Ptr(0.0),
+        StopSequences: []string{"\n\nHuman:"},
+    },
+})
+~~~
+
+`luft.Ptr` is a one-line helper for the pointer fields. Support varies by provider; unsupported fields are dropped (not an error), so the same `GenerationParams` is reusable across backends:
+
+| Provider | Temperature | TopP | TopK | StopSequences | Seed |
+|---|---|---|---|---|---|
+| `anthropic.Provider` | ✓ | ✓ | ✓ | ✓ | — |
+| `openai.Provider` | ✓ | ✓ | — | ✓ | ✓ |
+| `openai.ResponsesProvider` | ✓ | ✓ | — | — | — |
+| `openrouter.Provider` | ✓ | ✓ | — | ✓ | ✓ |
 
 ## Prompt caching
 

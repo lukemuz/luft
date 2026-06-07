@@ -1,7 +1,7 @@
 # Recipe 05: persistent chat with an event log
 
-Demonstrates `luft`'s position that **you own the data, not a
-`SessionService`**. Session state is plain Go data, persistence is a five-method
+Demonstrates `luft`'s position that **the session is plain data, not a
+framework-owned `SessionService`**. Session state is plain Go data, persistence is a five-method
 interface, and a `Recorder` captures intermediate turn activity into
 `Session.Events` alongside the model-facing `History`.
 
@@ -46,13 +46,6 @@ document you can `cat`, `jq`, diff, or hand-edit.
 - `luft.Event` and the `EventType` constants
 - `luft.Agent` driving the turn
 - Built-in tools: `tools/math`
-
-## ADK comparison
-
-See [`COMPARISON.md`](../../../COMPARISON.md#worked-comparison-persistent-chat)
-for the side-by-side ADK shape — what an `InMemorySessionService` /
-`DatabaseSessionService` looks like vs. this read-modify-write loop, and
-how ADK's per-event session log compares to `Session.Events` here.
 
 ## Notes
 

@@ -49,8 +49,9 @@ func (r RetryConfig) applyDefaults() RetryConfig {
 // back-off + jitter. It respects a Retry-After header value embedded in
 // APIError when present.
 //
-// Retryable conditions: *APIError with StatusCode 429 or 503, any error
-// satisfying isTemporary, and network-level *url.Error / *net.OpError values.
+// Retryable conditions: *APIError with a transient StatusCode (429, 529, or
+// 5xx — see isRetryableStatus), any error satisfying isTemporary, and
+// network-level *url.Error / *net.OpError values.
 //
 // Non-retryable conditions return immediately: *APIError with StatusCode 400,
 // 401, 403, or 404; ErrMissingTool; and context cancellation / deadline.
@@ -138,7 +139,7 @@ func isRetryable(err error) bool {
 	// Retryable API status codes.
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode == 429 || apiErr.StatusCode == 503
+		return isRetryableStatus(apiErr.StatusCode)
 	}
 
 	// Network-level errors.
@@ -153,6 +154,20 @@ func isRetryable(err error) bool {
 
 	// Errors implementing the Temporary() bool interface.
 	return isTemporary(err)
+}
+
+// isRetryableStatus reports whether an HTTP status code is worth retrying.
+// 429 (rate limited) and 529 (Anthropic "overloaded") are explicit transient
+// signals; 500/502/503/504 are server and gateway errors that are typically
+// transient too. The hard 4xx authz/validation codes (400/401/403/404) are
+// rejected earlier in callWithRetry and never reach here.
+func isRetryableStatus(code int) bool {
+	switch code {
+	case 429, 500, 502, 503, 504, 529:
+		return true
+	default:
+		return false
+	}
 }
 
 // backoffWait computes the sleep duration for the given attempt index.

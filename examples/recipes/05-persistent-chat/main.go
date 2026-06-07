@@ -1,7 +1,7 @@
 // Recipe 05: persistent chat with a per-turn activity log.
 //
-// The headline claim: in luft, a session is plain data. You own the
-// read-modify-write cycle, the storage backend is a five-method interface,
+// The headline claim: in luft, a session is plain data. The read-modify-write
+// cycle is ordinary code, the storage backend is a five-method interface,
 // and a Recorder captures intermediate turn activity (model calls, tool
 // calls, retries) into Session.Events alongside the model-facing History.
 //

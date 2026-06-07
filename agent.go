@@ -25,6 +25,11 @@ type Config struct {
 	// LoopStream. The most useful single cache placement when the system
 	// text is long and stable across turns.
 	SystemCache *CacheControl
+
+	// Generation sets optional sampling controls (temperature, top_p, stop
+	// sequences, …) applied to every call this Client makes. The zero value
+	// leaves provider defaults untouched. See GenerationParams.
+	Generation GenerationParams
 }
 
 // Well-known Anthropic model identifiers.
@@ -96,6 +101,7 @@ func (c *Client) Ask(ctx context.Context, system string, history []Message) (Mes
 		System:      system,
 		Messages:    history,
 		SystemCache: c.cfg.SystemCache,
+		Generation:  c.cfg.Generation,
 	}
 	resp, err := callWithRetry(ctx, c.cfg.Retry, func() (ProviderResponse, error) {
 		return c.cfg.Provider.Call(ctx, req)
@@ -131,6 +137,7 @@ func (c *Client) AskStream(ctx context.Context, system string, history []Message
 		System:      system,
 		Messages:    history,
 		SystemCache: c.cfg.SystemCache,
+		Generation:  c.cfg.Generation,
 	}
 	resp, err := callWithRetry(ctx, c.cfg.Retry, func() (ProviderResponse, error) {
 		return c.cfg.Provider.Stream(ctx, req, onToken)
@@ -297,6 +304,7 @@ func (c *Client) runLoop(
 			Tools:         toolDefs,
 			ProviderTools: tools.ProviderTools,
 			SystemCache:   c.cfg.SystemCache,
+			Generation:    c.cfg.Generation,
 		}
 		emit(ctx, rec, Event{TurnID: turnID, Iter: iter, Type: EventModelRequest})
 		var resp ProviderResponse

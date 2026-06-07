@@ -217,4 +217,5 @@ No persistence, runner, scheduler, or hidden lifecycle.
 
 - [`README.md`](README.md) for providers, streaming, retries, errors, sessions, MCP, and testing.
 - [`VISION.md`](VISION.md) for the design philosophy.
+- [`cmd/luft/README.md`](cmd/luft/README.md) for the CLI coding agent built on the library.
 - [`examples/recipes/`](examples/recipes/) for runnable patterns.

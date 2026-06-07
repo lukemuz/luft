@@ -30,12 +30,6 @@ go run ./examples/recipes/06-parallel-pipeline
 - `luft.Client.Ask` for single-shot calls (no tool loop)
 - `luft.NewUserMessage`, `luft.TextContent`
 
-## ADK comparison
-
-See [`COMPARISON.md`](../../../COMPARISON.md#worked-comparison-pipeline)
-for the side-by-side ADK shape — what `ParallelAgent` composed with
-`SequentialAgent` looks like vs. this `Parallel` + ordinary call.
-
 ## Notes
 
 - **No cancellation policy is imposed.** `Parallel` waits for every step

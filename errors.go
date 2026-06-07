@@ -3,6 +3,9 @@ package luft
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -84,4 +87,28 @@ func (e *RetryExhaustedError) Error() string {
 // ErrRetryExhausted so callers can match on errors.Is(err, ErrRetryExhausted).
 func (e *RetryExhaustedError) Unwrap() []error {
 	return []error{e.Cause, ErrRetryExhausted}
+}
+
+// ParseRetryAfter extracts a Retry-After hint from response headers for use in
+// APIError.RetryAfter. It accepts both header forms: delta-seconds ("120") and
+// an HTTP-date ("Wed, 21 Oct 2025 07:28:00 GMT"). It returns 0 when the header
+// is absent, malformed, or already in the past, in which case callers fall back
+// to ordinary exponential backoff.
+func ParseRetryAfter(h http.Header) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }

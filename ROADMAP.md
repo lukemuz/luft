@@ -6,7 +6,7 @@ Forward-looking work only. For what already ships, see [`README.md`](README.md).
 
 > Easy things easy. Hard things possible. Nothing hidden.
 >
-> You own the data. You own the tools. You own the loop.
+> A library, not a framework. Read the code, not the manual.
 
 Future work should make the common path shorter without introducing hidden model calls, hidden tool execution, hidden persistence, global registries, or framework-owned control flow.
 
@@ -14,7 +14,6 @@ Future work should make the common path shorter without introducing hidden model
 
 - **Durable tool execution.** Opt-in middleware that uses tool-use IDs as idempotency keys against a small `ToolResultStore`, so side-effectful tools survive crash-resume. Composes with existing middleware.
 - **Observability hooks.** Expand `Hooks` toward request/response/tool/error events, plus an `agent/otel` subpackage so the core stays free of OpenTelemetry.
-- **Extended generation controls.** Thread temperature, top-p, and stop sequences through `ProviderRequest`. Zero values keep provider defaults.
 - **Testing helpers.** Tiny mock and scripted providers, plus assertions for history shape, tool calls, and usage. The `Provider` interface stays the main testing seam.
 - **HTTP/SSE example.** A `net/http` handler that loads history, calls `Agent.StepStream`, writes SSE events, and saves. No web framework, no runner.
 - **Evaluation helpers.** Small offline regression helpers. No hosted dashboards, no required databases.

@@ -32,11 +32,6 @@ go run ./examples/recipes/04-router-subagents -dir . "What does this project do,
 - `luft.Toolset` with `ToolMetadata.Source` annotations
 - Built-in tools: `tools/clock`, `tools/workspace` (read-only)
 
-## ADK comparison
-
-See [`COMPARISON.md`](../../../COMPARISON.md#worked-comparison-a-router-with-specialists)
-for the side-by-side ADK shape.
-
 ## Notes
 
 The `subagentTool` helper at the bottom of `main.go` is intentionally local
