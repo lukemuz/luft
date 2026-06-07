@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- AWS Bedrock and Vertex AI Gemini providers. `providers/bedrock` speaks the
+  Converse / ConverseStream API with hand-rolled SigV4 signing and AWS
+  event-stream decoding; `providers/vertex` speaks Gemini generateContent with
+  hand-rolled service-account JWT → OAuth auth. Both are zero-dependency
+  (standard library only), support tools and images, and honor
+  `GenerationParams` and `Retry-After`.
 - Generation controls. `GenerationParams` (temperature, top_p, top_k, stop
   sequences, seed) is now a field on both `luft.Config` and
   `luft.ProviderRequest`, threaded through `Ask`, `AskStream`, `Loop`,
