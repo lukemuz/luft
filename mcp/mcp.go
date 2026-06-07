@@ -314,7 +314,7 @@ func (s *Server) initialize(ctx context.Context) error {
 		"capabilities":    map[string]interface{}{},
 		"clientInfo": map[string]interface{}{
 			"name":    "luft",
-			"version": "0.1.2",
+			"version": "0.2.0",
 		},
 	}
 	_, err := s.call(ctx, "initialize", params)

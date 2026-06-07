@@ -80,7 +80,7 @@ import (
 // version is the build-time version of the luft CLI. The default tracks
 // the most recent tagged release; release builds can override it with
 // `go build -ldflags "-X main.version=vX.Y.Z"`.
-var version = "v0.1.2"
+var version = "v0.2.0"
 
 const mainSystemPrompt = `You are luft, a fast and economical CLI coding assistant built on the luft toolkit. You operate inside a workspace directory and help the user with software engineering tasks — reading code, making edits, running commands, and reasoning about changes.
 
