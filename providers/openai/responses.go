@@ -86,6 +86,8 @@ type openAIResponsesRequest struct {
 	Instructions    string            `json:"instructions,omitempty"`
 	Tools           []json.RawMessage `json:"tools,omitempty"`
 	MaxOutputTokens int               `json:"max_output_tokens,omitempty"`
+	Temperature     *float64          `json:"temperature,omitempty"`
+	TopP            *float64          `json:"top_p,omitempty"`
 	Stream          bool              `json:"stream,omitempty"`
 }
 
@@ -386,6 +388,8 @@ func buildResponsesRequest(req luft.ProviderRequest, stream bool) ([]byte, error
 		Instructions:    req.System,
 		Tools:           tools,
 		MaxOutputTokens: req.MaxTokens,
+		Temperature:     req.Generation.Temperature,
+		TopP:            req.Generation.TopP,
 		Stream:          stream,
 	}
 	body, err := json.Marshal(wire)
@@ -404,6 +408,7 @@ func decodeResponsesError(resp *http.Response) error {
 		StatusCode: resp.StatusCode,
 		Type:       body.Error.Type,
 		Message:    body.Error.Message,
+		RetryAfter: luft.ParseRetryAfter(resp.Header),
 	}
 }
 

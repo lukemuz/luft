@@ -299,6 +299,30 @@ Tools and `ProviderTool`s are tagged for one provider; passing them to a differe
 
 **OpenAI: Chat Completions vs. Responses.** Hosted tools (`web_search`, `file_search`, `code_interpreter`, `image_generation`) live on `/v1/responses`, not `/v1/chat/completions`. Use `openai.NewResponsesClientFromEnv(model)` (or build one from `openai.NewResponsesProvider`) when you want them. Plain function calling works on both endpoints; OpenAI has signaled Responses as the path forward, so prefer it for new code.
 
+## Generation controls
+
+`GenerationParams` threads optional sampling controls onto every call — set them once on `Config` (they ride through `Ask`, `Loop`, `Agent`, and `Extract`). Pointer fields mean the zero value leaves the provider default untouched, so `temperature: 0` (deterministic) stays distinct from "unset":
+
+~~~go
+client, _ := luft.New(luft.Config{
+    Provider:   provider,
+    Model:      luft.ModelSonnet,
+    Generation: luft.GenerationParams{
+        Temperature:   luft.Ptr(0.0),
+        StopSequences: []string{"\n\nHuman:"},
+    },
+})
+~~~
+
+`luft.Ptr` is a one-line helper for the pointer fields. Support varies by provider; unsupported fields are dropped (not an error), so the same `GenerationParams` is reusable across backends:
+
+| Provider | Temperature | TopP | TopK | StopSequences | Seed |
+|---|---|---|---|---|---|
+| `anthropic.Provider` | ✓ | ✓ | ✓ | ✓ | — |
+| `openai.Provider` | ✓ | ✓ | — | ✓ | ✓ |
+| `openai.ResponsesProvider` | ✓ | ✓ | — | — | — |
+| `openrouter.Provider` | ✓ | ✓ | — | ✓ | ✓ |
+
 ## Prompt caching
 
 Long, stable prompts (system instructions, tool definitions, big context blocks) can be cached so subsequent turns pay a fraction of the input-token cost. Caching is provider-specific in mechanism but exposed uniformly via `luft.CacheControl`:

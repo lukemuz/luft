@@ -847,6 +847,33 @@ func TestCallWithRetry(t *testing.T) {
 			wantSomeErr:  true,
 			wantAttempts: 1,
 		},
+		{
+			name:     "retryable 529 overloaded with exhaustion",
+			retryCfg: RetryConfig{MaxRetries: 1, InitialWait: time.Millisecond},
+			fn: func() (ProviderResponse, error) {
+				return ProviderResponse{}, &APIError{StatusCode: 529, Message: "overloaded"}
+			},
+			wantErr:      ErrRetryExhausted,
+			wantAttempts: 2,
+		},
+		{
+			name:     "retryable 500 with exhaustion",
+			retryCfg: RetryConfig{MaxRetries: 1, InitialWait: time.Millisecond},
+			fn: func() (ProviderResponse, error) {
+				return ProviderResponse{}, &APIError{StatusCode: 500, Message: "server error"}
+			},
+			wantErr:      ErrRetryExhausted,
+			wantAttempts: 2,
+		},
+		{
+			name:     "non-retryable 422 returns immediately",
+			retryCfg: RetryConfig{MaxRetries: 3, InitialWait: time.Millisecond},
+			fn: func() (ProviderResponse, error) {
+				return ProviderResponse{}, &APIError{StatusCode: 422, Message: "unprocessable"}
+			},
+			wantSomeErr:  true,
+			wantAttempts: 1,
+		},
 	}
 
 	for _, tt := range tests {

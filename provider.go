@@ -43,6 +43,12 @@ type ProviderRequest struct {
 	// is large and stable across turns. Honored by AnthropicProvider and
 	// OpenRouterProvider; ignored elsewhere (OpenAI caches automatically).
 	SystemCache *CacheControl
+
+	// Generation carries optional sampling controls (temperature, top_p,
+	// stop sequences, …). The zero value leaves every provider default in
+	// place. Providers silently ignore controls they do not support; see
+	// GenerationParams for the per-provider support matrix.
+	Generation GenerationParams
 }
 
 // ProviderResponse is the normalised response every Provider must return.
@@ -51,3 +57,41 @@ type ProviderResponse struct {
 	StopReason string
 	Usage      Usage
 }
+
+// GenerationParams holds optional sampling controls. Every field is a pointer
+// or slice so its zero value means "unset — use the provider's default."
+//
+// Pointers matter most for Temperature: temperature 0 (deterministic) is a
+// meaningful value that a bare float64 could not distinguish from "unset."
+// Construct pointers with Ptr:
+//
+//	gen := luft.GenerationParams{Temperature: luft.Ptr(0.0)}
+//
+// Provider support varies; unsupported fields are silently dropped:
+//
+//	                          Temperature  TopP  TopK  StopSequences  Seed
+//	anthropic.Provider             ✓        ✓     ✓         ✓          —
+//	openai.Provider                ✓        ✓     —         ✓          ✓
+//	openai.ResponsesProvider       ✓        ✓     —         —          —
+//	openrouter.Provider            ✓        ✓     —         ✓          ✓
+type GenerationParams struct {
+	// Temperature controls sampling randomness; nil uses the provider default.
+	Temperature *float64
+	// TopP is the nucleus-sampling probability mass; nil uses the default.
+	TopP *float64
+	// TopK limits sampling to the top-K tokens. Honored only by
+	// anthropic.Provider; other providers leave it unset.
+	TopK *int
+	// StopSequences are strings that halt generation when produced. Empty
+	// means none. Honored by every provider except openai.ResponsesProvider.
+	StopSequences []string
+	// Seed requests reproducible sampling where the backend supports it
+	// (OpenAI / OpenRouter). nil leaves it unset; anthropic ignores it.
+	Seed *int
+}
+
+// Ptr returns a pointer to v. It is a convenience for the optional pointer
+// fields of GenerationParams (and any other *T config field):
+//
+//	luft.GenerationParams{Temperature: luft.Ptr(0.2), Seed: luft.Ptr(42)}
+func Ptr[T any](v T) *T { return &v }

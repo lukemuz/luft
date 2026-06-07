@@ -83,12 +83,26 @@ func NewClientFromEnv(model string) (*luft.Client, error) {
 // when a cache breakpoint is set, as an array of typed text blocks. With
 // json:"omitempty" the nil interface is dropped from the request entirely.
 type anthropicRequest struct {
-	Model     string            `json:"model"`
-	MaxTokens int               `json:"max_tokens"`
-	System    any               `json:"system,omitempty"`
-	Messages  []luft.Message    `json:"messages"`
-	Tools     []json.RawMessage `json:"tools,omitempty"`
-	Stream    bool              `json:"stream,omitempty"`
+	Model         string            `json:"model"`
+	MaxTokens     int               `json:"max_tokens"`
+	System        any               `json:"system,omitempty"`
+	Messages      []luft.Message    `json:"messages"`
+	Tools         []json.RawMessage `json:"tools,omitempty"`
+	Temperature   *float64          `json:"temperature,omitempty"`
+	TopP          *float64          `json:"top_p,omitempty"`
+	TopK          *int              `json:"top_k,omitempty"`
+	StopSequences []string          `json:"stop_sequences,omitempty"`
+	Stream        bool              `json:"stream,omitempty"`
+}
+
+// applyGeneration copies the supported sampling controls onto the wire request.
+// Anthropic supports temperature, top_p, top_k, and stop_sequences; Seed has no
+// Messages-API equivalent and is ignored.
+func applyGeneration(r *anthropicRequest, g luft.GenerationParams) {
+	r.Temperature = g.Temperature
+	r.TopP = g.TopP
+	r.TopK = g.TopK
+	r.StopSequences = g.StopSequences
 }
 
 // anthropicSystemBlock is the array-form payload used when the system
@@ -179,6 +193,7 @@ func (p *Provider) Call(ctx context.Context, req luft.ProviderRequest) (luft.Pro
 		Messages:  req.Messages,
 		Tools:     tools,
 	}
+	applyGeneration(&wireReq, req.Generation)
 
 	body, err := json.Marshal(wireReq)
 	if err != nil {
@@ -207,6 +222,7 @@ func (p *Provider) Call(ctx context.Context, req luft.ProviderRequest) (luft.Pro
 			StatusCode: resp.StatusCode,
 			Type:       errBody.Error.Type,
 			Message:    errBody.Error.Message,
+			RetryAfter: luft.ParseRetryAfter(resp.Header),
 		}
 	}
 
@@ -241,6 +257,7 @@ func (p *Provider) Stream(ctx context.Context, req luft.ProviderRequest, onDelta
 		Tools:     tools,
 		Stream:    true,
 	}
+	applyGeneration(&wireReq, req.Generation)
 
 	body, err := json.Marshal(wireReq)
 	if err != nil {
@@ -270,6 +287,7 @@ func (p *Provider) Stream(ctx context.Context, req luft.ProviderRequest, onDelta
 			StatusCode: resp.StatusCode,
 			Type:       errBody.Error.Type,
 			Message:    errBody.Error.Message,
+			RetryAfter: luft.ParseRetryAfter(resp.Header),
 		}
 	}
 

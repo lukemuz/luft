@@ -31,11 +31,15 @@ const (
 // renders each function tool to JSON itself and concatenates with any
 // allowed ProviderTool.Raw bodies.
 type openAIChatRequest struct {
-	Model     string            `json:"model"`
-	MaxTokens int               `json:"max_tokens,omitempty"`
-	Messages  []openAIMessage   `json:"messages"`
-	Tools     []json.RawMessage `json:"tools,omitempty"`
-	Stream    bool              `json:"stream,omitempty"`
+	Model       string            `json:"model"`
+	MaxTokens   int               `json:"max_tokens,omitempty"`
+	Messages    []openAIMessage   `json:"messages"`
+	Tools       []json.RawMessage `json:"tools,omitempty"`
+	Temperature *float64          `json:"temperature,omitempty"`
+	TopP        *float64          `json:"top_p,omitempty"`
+	Stop        []string          `json:"stop,omitempty"`
+	Seed        *int              `json:"seed,omitempty"`
+	Stream      bool              `json:"stream,omitempty"`
 }
 
 // openAIMessage is a wire message. Content is `any` so request paths can
@@ -353,6 +357,17 @@ func toOpenAITools(tools []luft.Tool, providerTools []luft.ProviderTool, cacheCo
 	return out, nil
 }
 
+// applyChatGeneration copies supported sampling controls onto the chat-
+// completions wire request. OpenAI (and OpenRouter, via this shared path)
+// support temperature, top_p, stop, and seed. TopK has no equivalent in this
+// wire format and is dropped.
+func applyChatGeneration(r *openAIChatRequest, g luft.GenerationParams) {
+	r.Temperature = g.Temperature
+	r.TopP = g.TopP
+	r.Stop = g.StopSequences
+	r.Seed = g.Seed
+}
+
 // openAIFinishReason maps an OpenAI finish_reason to canonical StopReason.
 func openAIFinishReason(reason string) string {
 	switch reason {
@@ -510,6 +525,7 @@ func CompatibleCall(
 		Messages:  toOpenAIMessages(req.System, req.SystemCache, req.Messages, cacheCompatible),
 		Tools:     openaiTools,
 	}
+	applyChatGeneration(&chatReq, req.Generation)
 
 	body, err := json.Marshal(chatReq)
 	if err != nil {
@@ -536,6 +552,7 @@ func CompatibleCall(
 			StatusCode: resp.StatusCode,
 			Type:       errBody.Error.Type,
 			Message:    errBody.Error.Message,
+			RetryAfter: luft.ParseRetryAfter(resp.Header),
 		}
 	}
 
@@ -577,6 +594,7 @@ func CompatibleStream(
 		Tools:     openaiTools,
 		Stream:    true,
 	}
+	applyChatGeneration(&chatReq, req.Generation)
 
 	body, err := json.Marshal(chatReq)
 	if err != nil {
@@ -604,6 +622,7 @@ func CompatibleStream(
 			StatusCode: resp.StatusCode,
 			Type:       errBody.Error.Type,
 			Message:    errBody.Error.Message,
+			RetryAfter: luft.ParseRetryAfter(resp.Header),
 		}
 	}
 

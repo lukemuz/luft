@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Generation controls. `GenerationParams` (temperature, top_p, top_k, stop
+  sequences, seed) is now a field on both `luft.Config` and
+  `luft.ProviderRequest`, threaded through `Ask`, `AskStream`, `Loop`,
+  `LoopStream`, `Agent`, and `Extract`. Fields are pointers/slices so the zero
+  value preserves provider defaults (and `temperature: 0` is distinct from
+  unset). New `luft.Ptr` helper for setting them. Per-provider support varies
+  and unsupported fields are dropped — see the `GenerationParams` doc comment.
+
+### Fixed
+
+- Retries now cover Anthropic's `529` "overloaded" status and the
+  `500`/`502`/`503`/`504` server and gateway errors, in addition to `429`.
+  Previously only `429` and `503` were retried, so Anthropic overload errors
+  failed hard.
+- `Retry-After` response headers are now parsed by every provider (new exported
+  `luft.ParseRetryAfter`) and honored by the backoff. The retry layer already
+  respected `APIError.RetryAfter`, but no provider populated it, so the hint
+  was silently ignored until now.
+
 ## v0.1.2 — 2026-05-09
 
 ### Added
