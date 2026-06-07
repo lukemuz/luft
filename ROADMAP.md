@@ -6,7 +6,7 @@ Forward-looking work only. For what already ships, see [`README.md`](README.md).
 
 > Easy things easy. Hard things possible. Nothing hidden.
 >
-> You own the data. You own the tools. You own the loop.
+> A library, not a framework. Read the code, not the manual.
 
 Future work should make the common path shorter without introducing hidden model calls, hidden tool execution, hidden persistence, global registries, or framework-owned control flow.
 

@@ -4,7 +4,7 @@
 
 > Easy things easy. Hard things possible. Nothing hidden.
 >
-> You own the data. You own the tools. You own the loop.
+> A library, not a framework. Read the code, not the manual.
 
 ## The problem
 
