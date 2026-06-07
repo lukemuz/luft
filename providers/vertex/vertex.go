@@ -175,10 +175,10 @@ func NewProviderWithToken(project, location, token string) (*Provider, error) {
 // ---- wire types ----
 
 type generateRequest struct {
-	Contents          []geminiContent      `json:"contents"`
-	SystemInstruction *geminiContent       `json:"systemInstruction,omitempty"`
-	GenerationConfig  *generationConfig    `json:"generationConfig,omitempty"`
-	Tools             []geminiToolDecl     `json:"tools,omitempty"`
+	Contents          []geminiContent   `json:"contents"`
+	SystemInstruction *geminiContent    `json:"systemInstruction,omitempty"`
+	GenerationConfig  *generationConfig `json:"generationConfig,omitempty"`
+	Tools             []geminiToolDecl  `json:"tools,omitempty"`
 }
 
 type geminiContent struct {
@@ -211,7 +211,12 @@ type geminiFunctionResp struct {
 }
 
 type generationConfig struct {
-	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
+	MaxOutputTokens int      `json:"maxOutputTokens,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+	TopP            *float64 `json:"topP,omitempty"`
+	TopK            *int     `json:"topK,omitempty"`
+	StopSequences   []string `json:"stopSequences,omitempty"`
+	Seed            *int     `json:"seed,omitempty"`
 }
 
 type geminiToolDecl struct {
@@ -258,8 +263,18 @@ func buildGenerateRequest(req luft.ProviderRequest) (generateRequest, error) {
 	if req.System != "" {
 		out.SystemInstruction = &geminiContent{Parts: []geminiPart{{Text: req.System}}}
 	}
-	if req.MaxTokens > 0 {
-		out.GenerationConfig = &generationConfig{MaxOutputTokens: req.MaxTokens}
+	// Gemini's generationConfig honors all five sampling controls.
+	gc := generationConfig{
+		MaxOutputTokens: req.MaxTokens,
+		Temperature:     req.Generation.Temperature,
+		TopP:            req.Generation.TopP,
+		TopK:            req.Generation.TopK,
+		StopSequences:   req.Generation.StopSequences,
+		Seed:            req.Generation.Seed,
+	}
+	if gc.MaxOutputTokens > 0 || gc.Temperature != nil || gc.TopP != nil ||
+		gc.TopK != nil || gc.Seed != nil || len(gc.StopSequences) > 0 {
+		out.GenerationConfig = &gc
 	}
 
 	contents, err := messagesToGemini(req.Messages)
@@ -619,5 +634,6 @@ func decodeError(resp *http.Response) error {
 		StatusCode: resp.StatusCode,
 		Type:       eb.Error.Status,
 		Message:    msg,
+		RetryAfter: luft.ParseRetryAfter(resp.Header),
 	}
 }

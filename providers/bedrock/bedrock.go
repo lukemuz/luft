@@ -142,7 +142,10 @@ type converseSystemBlock struct {
 }
 
 type inferenceConfig struct {
-	MaxTokens int `json:"maxTokens,omitempty"`
+	MaxTokens     int      `json:"maxTokens,omitempty"`
+	Temperature   *float64 `json:"temperature,omitempty"`
+	TopP          *float64 `json:"topP,omitempty"`
+	StopSequences []string `json:"stopSequences,omitempty"`
 }
 
 type converseToolConfig struct {
@@ -195,9 +198,9 @@ type converseToolUse struct {
 }
 
 type converseToolResult struct {
-	ToolUseID string                     `json:"toolUseId"`
-	Content   []converseToolResultBlock  `json:"content"`
-	Status    string                     `json:"status,omitempty"` // "success" | "error"
+	ToolUseID string                    `json:"toolUseId"`
+	Content   []converseToolResultBlock `json:"content"`
+	Status    string                    `json:"status,omitempty"` // "success" | "error"
 }
 
 type converseToolResultBlock struct {
@@ -230,8 +233,18 @@ func buildConverseRequest(req luft.ProviderRequest) (converseRequest, error) {
 	if req.System != "" {
 		out.System = []converseSystemBlock{{Text: req.System}}
 	}
-	if req.MaxTokens > 0 {
-		out.InferenceConfig = &inferenceConfig{MaxTokens: req.MaxTokens}
+	// Bedrock Converse exposes temperature, topP, and stopSequences in
+	// inferenceConfig. TopK and Seed have no portable Converse field (they are
+	// model-specific additionalModelRequestFields) and are dropped. The config
+	// is attached only when at least one field is set.
+	ic := inferenceConfig{
+		MaxTokens:     req.MaxTokens,
+		Temperature:   req.Generation.Temperature,
+		TopP:          req.Generation.TopP,
+		StopSequences: req.Generation.StopSequences,
+	}
+	if ic.MaxTokens > 0 || ic.Temperature != nil || ic.TopP != nil || len(ic.StopSequences) > 0 {
+		out.InferenceConfig = &ic
 	}
 
 	msgs, err := messagesToConverse(req.Messages)
@@ -434,11 +447,11 @@ func (p *Provider) Stream(ctx context.Context, req luft.ProviderRequest, onDelta
 
 	// Per-block accumulation, keyed by contentBlock index.
 	type blockState struct {
-		text       strings.Builder
-		toolID     string
-		toolName   string
-		toolInput  strings.Builder
-		isToolUse  bool
+		text      strings.Builder
+		toolID    string
+		toolName  string
+		toolInput strings.Builder
+		isToolUse bool
 	}
 	blocks := map[int]*blockState{}
 	get := func(i int) *blockState {
@@ -627,6 +640,7 @@ func decodeError(resp *http.Response) error {
 		StatusCode: resp.StatusCode,
 		Type:       eb.Type,
 		Message:    msg,
+		RetryAfter: luft.ParseRetryAfter(resp.Header),
 	}
 }
 
