@@ -10,8 +10,8 @@ You'll need an OpenRouter API key in your environment for any of these:
 export OPENROUTER_API_KEY=sk-or-...
 ```
 
-Models default to `x-ai/grok-4.3` for the main agent and plan subagent,
-and `openai/gpt-oss-120b` for the explore subagent (super fast and cheap
+Models default to `z-ai/glm-5.2` for the main agent and plan subagent,
+and `google/gemini-3.5-flash` for the explore subagent (super fast and cheap
 for inspection workloads). `-model`, `-explore-model`, and `-plan-model`
 accept any OpenRouter slug (e.g. `openai/gpt-5`, `google/gemini-2.5-pro`,
 `anthropic/claude-sonnet-4.6`). Each flag has a matching env var
@@ -77,8 +77,8 @@ The agent operates on the current working directory by default. Pass `-dir <path
 
 You should see:
 ```
-luft  model=x-ai/grok-4.3  bash=restricted  subagents=on  dir=/abs/path
-        explore=openai/gpt-oss-120b  plan=x-ai/grok-4.3
+luft  model=z-ai/glm-5.2  bash=restricted  subagents=on  dir=/abs/path
+        explore=google/gemini-3.5-flash  plan=z-ai/glm-5.2
 type a request, or /help for commands. ctrl-c to interrupt, ctrl-d to exit.
 > 
 ```
@@ -90,14 +90,14 @@ If you get `openrouter provider: OPENROUTER_API_KEY environment variable is not 
 ## What's running
 
 ```
-main agent (x-ai/grok-4.3 by default)
+main agent (z-ai/glm-5.2 by default)
   ├── direct tools  workspace + bash + str_replace_based_edit_tool
   │                 + todo + clock + batch
-  ├── explore       subagent on openai/gpt-oss-120b — read-only fs + restricted bash + batch
-  └── plan          subagent on x-ai/grok-4.3 — read-only fs only, no shell, no edits
+  ├── explore       subagent on google/gemini-3.5-flash — read-only fs + restricted bash + batch
+  └── plan          subagent on z-ai/glm-5.2 — read-only fs only, no shell, no edits
 ```
 
-Why three agents? Cost tiering and context isolation. The main Grok decides what work to do; cheap inspection happens on gpt-oss-120b and never enters the main context (only the subagent's final summary returns); hard reasoning stays on a strong model via the `plan` tool when wanted.
+Why three agents? Cost tiering and context isolation. The main GLM model decides what work to do; cheap inspection happens on gemini-3.5-flash and never enters the main context (only the subagent's final summary returns); hard reasoning stays on a strong model via the `plan` tool when wanted.
 
 ## Tools available to the main agent
 
@@ -105,15 +105,17 @@ Why three agents? Cost tiering and context isolation. The main Grok decides what
 |---|---|---|
 | `list_directory`, `Glob`, `Grep`, `read_file`, `file_info` | Read-only filesystem inspection (workspace package) | no |
 | `str_replace_based_edit_tool` | Text editor: view / create / str_replace / insert | yes |
+| `multi_edit` | Apply several str_replace edits to one file atomically (all-or-nothing) | yes |
 | `bash` | Sandboxed shell, governed by `-bash` mode | yes (in standard/unrestricted modes) |
 | `todo_write`, `todo_read` | Planning checklist; replace-whole-list semantics | no |
 | `batch` | Run several read-only tool calls concurrently in one turn | no |
 | `web_fetch` | Download a URL over http(s); HTML→text, paginates long pages | no |
+| `web_search` | OpenRouter hosted search; results with citations (disable with `-no-search`) | no |
 | `now` | Current time | no |
-| `explore(task)` | Delegate inspection to a gpt-oss-120b-backed subagent | no |
-| `plan(task)` | Delegate hard reasoning to a grok-4.3-backed subagent | no |
+| `explore(task)` | Delegate inspection to a gemini-3.5-flash-backed subagent | no |
+| `plan(task)` | Delegate hard reasoning to a glm-5.2-backed subagent | no |
 
-`Glob` and `Grep` use the same names Claude Code uses, so the model recognises them immediately. `web_fetch` is a native Go tool (no external dependency, no API key) that downloads a URL, strips scripts/styles, decodes entities, and paginates long pages via `max_length` + `start_index`. Disable it with `-no-fetch`. There is no built-in `web_search`; use `web_fetch` against a known URL or pair the agent with `bash` + `curl`.
+`Glob` and `Grep` use the same names Claude Code uses, so the model recognises them immediately. `web_fetch` is a native Go tool (no external dependency, no API key) that downloads a URL, strips scripts/styles, decodes entities, and paginates long pages via `max_length` + `start_index`. Disable it with `-no-fetch`. `web_search` is OpenRouter's hosted search tool — executed server-side and returned inline with citations, so it works regardless of the underlying model slug and needs no extra API key beyond your OpenRouter one. Disable it with `-no-search`. The two pair naturally: `web_search` to find a source, `web_fetch` to read it in full.
 
 The `explore` and `plan` subagents are themselves agents with their own toolsets — the main agent can ask them anything within their scope.
 
@@ -125,7 +127,11 @@ Two things make this fast and cheap:
 
 2. **Subagent context isolation.** When `explore` runs a 30-file investigation, all that searching and reading happens in the subagent's loop and dies with it. Only the textual summary returns to the main agent.
 
-When context fills up, run `/compact` (see below) — the summarizer (grok-4.3 by default; override with `LUFT_SUMMARIZE_MODEL`) compresses older turns so you can keep going without starting over.
+3. **Re-read dedup.** Reading the same file twice with the same arguments returns a short "unchanged" notice instead of the full content again (the tool still runs, so a changed file always returns fresh content). Pass a line range to force a fresh read if you need it.
+
+4. **Oversized-output compression.** `bash` output above `-result-budget` bytes (default 12K) is condensed by the summarizer model to its errors, failures, and final status before it lands in context — so a 50K test log doesn't cost 50K of tokens. Set `-result-budget 0` to disable and fall back to plain truncation. File reads are never compressed (you need them verbatim to edit correctly).
+
+Context is managed two ways. **Automatically:** before each model call, history over ~750K tokens is trimmed and the trimmed span is replaced by a compact summary (not silently dropped) using the summarizer model — so long autonomous runs degrade gracefully instead of losing the middle of their own work. The threshold leaves headroom under the 1M-token windows of the default models. **Manually:** run `/compact` (see below) any time to compress older turns yourself. Both paths use the summarizer (glm-5.2 by default; override with `LUFT_SUMMARIZE_MODEL`).
 
 ## Project memory
 
@@ -145,14 +151,17 @@ A good `AGENTS.md` is short and concrete: project conventions, how to run tests,
 | Flag | Default | Description |
 |---|---|---|
 | `-dir` | cwd | Working directory the agent is sandboxed to (defaults to the directory you launched from) |
-| `-model` | `x-ai/grok-4.3` | Main-agent model (any OpenRouter slug; env: `LUFT_MODEL`) |
-| `-explore-model` | `openai/gpt-oss-120b` | Model for the explore subagent (env: `LUFT_EXPLORE_MODEL`) |
-| `-plan-model` | `x-ai/grok-4.3` | Model for the plan subagent (env: `LUFT_PLAN_MODEL`) |
+| `-model` | `z-ai/glm-5.2` | Main-agent model (any OpenRouter slug; env: `LUFT_MODEL`) |
+| `-explore-model` | `google/gemini-3.5-flash` | Model for the explore subagent (env: `LUFT_EXPLORE_MODEL`) |
+| `-plan-model` | `z-ai/glm-5.2` | Model for the plan subagent (env: `LUFT_PLAN_MODEL`) |
 | `-no-subagents` | false | Disable the explore and plan tools |
 | `-no-fetch` | false | Disable the native `web_fetch` tool |
+| `-no-search` | false | Disable the OpenRouter `web_search` provider tool |
 | `-bash` | `restricted` | `restricted` \| `standard` \| `unrestricted` |
 | `-yes` | false | Auto-approve every confirmation prompt |
 | `-max-iter` | 30 | Max model calls per user turn |
+| `-context-budget` | `750000` | Token budget before automatic in-loop summarization kicks in (env: `LUFT_CONTEXT_BUDGET`) |
+| `-result-budget` | `12000` | Byte threshold above which noisy `bash` output is summarized; `0` disables (env: `LUFT_RESULT_BUDGET`) |
 | `-log` | (off) | JSONL session log path. Use `-log auto` to write under `~/.config/luft/sessions/<timestamp>.jsonl`, or pass an explicit path. |
 
 ### Bash safety modes
@@ -162,6 +171,16 @@ A good `AGENTS.md` is short and concrete: project conventions, how to run tests,
 - **`unrestricted`** (confirmation required): only the timeout (30s) and output cap (64 KiB) apply.
 
 You can pair any mode with `-yes` to auto-approve, e.g. for headless runs.
+
+### Confirmation prompts
+
+Edits (`str_replace_based_edit_tool`, `multi_edit`) and shell (in `standard`/`unrestricted` modes) prompt for approval on stderr with a diff/argument preview. Answer:
+
+- **`y`** — approve this one call
+- **`a`** — approve every call to *this tool* for the rest of the session (e.g. trust all edits once you're confident, while still confirming shell)
+- **`N`** (default) — reject; the model is told it wasn't approved and continues
+
+`-yes` skips all prompts including dangerous shell, so prefer the sticky **`a`** for interactive runs.
 
 ## Slash commands
 
@@ -201,7 +220,7 @@ The main agent answers directly using its read-only tools.
 ```
 > find every place we read environment variables and summarise the patterns
 ```
-The main agent should delegate this to `explore`. The gpt-oss-120b subagent fans out greps via `batch`, reads candidate files, and returns a summary. Cheap.
+The main agent should delegate this to `explore`. The gemini-3.5-flash subagent fans out greps via `batch`, reads candidate files, and returns a summary. Cheap.
 
 **Refactor:**
 ```
@@ -223,9 +242,7 @@ The main agent should call `plan` to delegate the design, then summarise back.
 
 ## What's not here yet
 
-- SHA-based file-content dedup (re-reads cost full tokens today)
-- Cheap-tier tool-result compression for oversized outputs
-- Auto-compaction at a context-window threshold
+- Persistent / resumable sessions across restarts (history dies on exit today)
 - Persistent codebase index across sessions
 - Speculative inspection while the model is drafting
 - OAuth / Claude subscription auth (API key only)

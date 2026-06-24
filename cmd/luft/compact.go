@@ -33,6 +33,30 @@ Format the output as Markdown with these sections, in this order:
 
 Be specific and concrete. Cite paths. This summary is the only thing the next assistant turn will see of the past.`
 
+// makeAutoSummarizer builds the ContextManager.Summarizer used for automatic
+// in-loop trimming. It reuses the /compact system prompt so manual and
+// automatic compaction produce consistent summaries, and renders the trim
+// zone with luft.RenderForSummary (tool outputs capped) to keep the call
+// cheap. Returning an error aborts the turn rather than silently inserting an
+// empty summary.
+func makeAutoSummarizer(client *luft.Client) func(context.Context, []luft.Message) (string, error) {
+	return func(ctx context.Context, trimmed []luft.Message) (string, error) {
+		rendered := luft.RenderForSummary(trimmed, 1500)
+		reply, _, err := client.Ask(ctx, compactSystemPrompt,
+			[]luft.Message{luft.NewUserMessage(
+				"Summarize the following earlier portion of the conversation so it can be dropped from context:\n\n" + rendered)},
+		)
+		if err != nil {
+			return "", fmt.Errorf("auto-compact: %w", err)
+		}
+		summary := luft.TextContent(reply)
+		if strings.TrimSpace(summary) == "" {
+			return "", fmt.Errorf("auto-compact: summarizer returned empty text")
+		}
+		return "[Compacted summary of earlier turns; continue from here.]\n\n" + summary, nil
+	}
+}
+
 // compact takes the conversation history and produces a new, shorter
 // history that preserves recent verbatim turns and replaces older turns
 // with a single synthetic summary message.
