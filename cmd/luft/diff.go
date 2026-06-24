@@ -14,6 +14,8 @@ import (
 // trained text_editor bindings.
 func renderEditPreview(toolName string, input json.RawMessage) (string, bool) {
 	switch toolName {
+	case "multi_edit":
+		return renderMultiEditPreview(input)
 	case "str_replace_based_edit_tool", "str_replace_editor":
 	default:
 		return "", false
@@ -53,6 +55,30 @@ func renderEditPreview(toolName string, input json.RawMessage) (string, bool) {
 	default:
 		// view (read-only) or unknown — let the caller fall back to JSON.
 		return "", false
+	}
+	return b.String(), true
+}
+
+// renderMultiEditPreview renders a multi_edit call as a stacked diff, one
+// removed/added block per edit, for the confirmation prompt.
+func renderMultiEditPreview(input json.RawMessage) (string, bool) {
+	var in struct {
+		Path  string `json:"path"`
+		Edits []struct {
+			OldStr string `json:"old_str"`
+			NewStr string `json:"new_str"`
+		} `json:"edits"`
+	}
+	if err := json.Unmarshal(input, &in); err != nil {
+		return "", false
+	}
+	const maxBodyLines = 20
+	var b strings.Builder
+	fmt.Fprintf(&b, "  %s %s %s\n", grey("multi-edit"), bold(in.Path), grey(fmt.Sprintf("(%d edits)", len(in.Edits))))
+	for i, ed := range in.Edits {
+		fmt.Fprintf(&b, "  %s\n", grey(fmt.Sprintf("edit %d:", i+1)))
+		writeRemovedLines(&b, ed.OldStr, maxBodyLines)
+		writeAddedLines(&b, ed.NewStr, maxBodyLines)
 	}
 	return b.String(), true
 }

@@ -101,7 +101,34 @@ func (e *Editor) Toolset() luft.Toolset {
 	tool, fn := luft.NewTypedTool("str_replace_based_edit_tool", desc, schema, func(ctx context.Context, in editorInput) (string, error) {
 		return e.dispatch(in)
 	})
-	return luft.Tools(luft.ToolBinding{Tool: tool, Func: fn, Meta: luft.ToolMetadata{RequiresConfirmation: true}})
+	single := luft.ToolBinding{Tool: tool, Func: fn, Meta: luft.ToolMetadata{RequiresConfirmation: true}}
+
+	multiSchema := luft.InputSchema{
+		Type: "object",
+		Properties: map[string]luft.SchemaProperty{
+			"path": {Type: "string", Description: "File path relative to the workspace root."},
+			"edits": {
+				Type:        "array",
+				Description: "Ordered list of edits applied to the same file. Each is applied in turn to the evolving file contents.",
+				Items: &luft.SchemaProperty{
+					Type: "object",
+					Properties: map[string]luft.SchemaProperty{
+						"old_str": {Type: "string", Description: "Exact existing substring to replace. Must be unique in the file at the point this edit is applied."},
+						"new_str": {Type: "string", Description: "Replacement text."},
+					},
+					Required: []string{"old_str", "new_str"},
+				},
+			},
+		},
+		Required: []string{"path", "edits"},
+	}
+	multiDesc := "Apply multiple str_replace edits to a single file in one atomic call. Edits apply in order to the evolving file; each old_str must match exactly once at the point it is applied. If any edit fails to match (or is non-unique), no edits are written. Prefer this over several str_replace_based_edit_tool calls when changing 2+ sites in the same file."
+	multiTool, multiFn := luft.NewTypedTool("multi_edit", multiDesc, multiSchema, func(ctx context.Context, in multiEditInput) (string, error) {
+		return e.multiEdit(in)
+	})
+	multi := luft.ToolBinding{Tool: multiTool, Func: multiFn, Meta: luft.ToolMetadata{RequiresConfirmation: true}}
+
+	return luft.Tools(single, multi)
 }
 
 func (e *Editor) dispatch(in editorInput) (string, error) {
@@ -337,4 +364,58 @@ func (e *Editor) insert(in editorInput) (string, error) {
 		return "", fmt.Errorf("insert: %w", err)
 	}
 	return fmt.Sprintf("inserted %d line(s) into %s after line %d", len(newLines), e.relPath(abs), at), nil
+}
+
+// multiEditInput is the input shape for the multi_edit tool: a single file
+// and an ordered list of str_replace edits applied atomically.
+type multiEditInput struct {
+	Path  string `json:"path"`
+	Edits []struct {
+		OldStr string `json:"old_str"`
+		NewStr string `json:"new_str"`
+	} `json:"edits"`
+}
+
+// multiEdit applies all edits to one file in a single atomic operation. Each
+// old_str must occur exactly once in the current buffer at the point it is
+// applied (later edits see the results of earlier ones). Validation runs over
+// an in-memory copy; the file is written only if every edit succeeds, so a
+// failure mid-list leaves the file untouched.
+func (e *Editor) multiEdit(in multiEditInput) (string, error) {
+	if len(in.Edits) == 0 {
+		return "", fmt.Errorf("multi_edit: edits is empty")
+	}
+	abs, err := e.safePath(in.Path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("multi_edit: %w", err)
+	}
+	if info.Size() > e.maxFileBytes {
+		return "", fmt.Errorf("multi_edit: file is %d bytes, exceeds limit %d", info.Size(), e.maxFileBytes)
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return "", fmt.Errorf("multi_edit: %w", err)
+	}
+	text := string(data)
+	for i, ed := range in.Edits {
+		if ed.OldStr == "" {
+			return "", fmt.Errorf("multi_edit: edit %d: old_str is required (no edits applied)", i+1)
+		}
+		count := strings.Count(text, ed.OldStr)
+		if count == 0 {
+			return "", fmt.Errorf("multi_edit: edit %d: old_str not found in %q (no edits applied)", i+1, in.Path)
+		}
+		if count > 1 {
+			return "", fmt.Errorf("multi_edit: edit %d: old_str matches %d times in %q; add surrounding context to make it unique (no edits applied)", i+1, count, in.Path)
+		}
+		text = strings.Replace(text, ed.OldStr, ed.NewStr, 1)
+	}
+	if err := os.WriteFile(abs, []byte(text), info.Mode().Perm()); err != nil {
+		return "", fmt.Errorf("multi_edit: %w", err)
+	}
+	return fmt.Sprintf("edited %s (%d replacements)", e.relPath(abs), len(in.Edits)), nil
 }

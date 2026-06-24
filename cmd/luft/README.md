@@ -105,15 +105,17 @@ Why three agents? Cost tiering and context isolation. The main GLM model decides
 |---|---|---|
 | `list_directory`, `Glob`, `Grep`, `read_file`, `file_info` | Read-only filesystem inspection (workspace package) | no |
 | `str_replace_based_edit_tool` | Text editor: view / create / str_replace / insert | yes |
+| `multi_edit` | Apply several str_replace edits to one file atomically (all-or-nothing) | yes |
 | `bash` | Sandboxed shell, governed by `-bash` mode | yes (in standard/unrestricted modes) |
 | `todo_write`, `todo_read` | Planning checklist; replace-whole-list semantics | no |
 | `batch` | Run several read-only tool calls concurrently in one turn | no |
 | `web_fetch` | Download a URL over http(s); HTML→text, paginates long pages | no |
+| `web_search` | OpenRouter hosted search; results with citations (disable with `-no-search`) | no |
 | `now` | Current time | no |
 | `explore(task)` | Delegate inspection to a gemini-3.5-flash-backed subagent | no |
 | `plan(task)` | Delegate hard reasoning to a glm-5.2-backed subagent | no |
 
-`Glob` and `Grep` use the same names Claude Code uses, so the model recognises them immediately. `web_fetch` is a native Go tool (no external dependency, no API key) that downloads a URL, strips scripts/styles, decodes entities, and paginates long pages via `max_length` + `start_index`. Disable it with `-no-fetch`. There is no built-in `web_search`; use `web_fetch` against a known URL or pair the agent with `bash` + `curl`.
+`Glob` and `Grep` use the same names Claude Code uses, so the model recognises them immediately. `web_fetch` is a native Go tool (no external dependency, no API key) that downloads a URL, strips scripts/styles, decodes entities, and paginates long pages via `max_length` + `start_index`. Disable it with `-no-fetch`. `web_search` is OpenRouter's hosted search tool — executed server-side and returned inline with citations, so it works regardless of the underlying model slug and needs no extra API key beyond your OpenRouter one. Disable it with `-no-search`. The two pair naturally: `web_search` to find a source, `web_fetch` to read it in full.
 
 The `explore` and `plan` subagents are themselves agents with their own toolsets — the main agent can ask them anything within their scope.
 
@@ -125,7 +127,7 @@ Two things make this fast and cheap:
 
 2. **Subagent context isolation.** When `explore` runs a 30-file investigation, all that searching and reading happens in the subagent's loop and dies with it. Only the textual summary returns to the main agent.
 
-When context fills up, run `/compact` (see below) — the summarizer (glm-5.2 by default; override with `LUFT_SUMMARIZE_MODEL`) compresses older turns so you can keep going without starting over.
+Context is managed two ways. **Automatically:** before each model call, history over ~120K tokens is trimmed and the trimmed span is replaced by a compact summary (not silently dropped) using the summarizer model — so long autonomous runs degrade gracefully instead of losing the middle of their own work. **Manually:** run `/compact` (see below) any time to compress older turns yourself. Both paths use the summarizer (glm-5.2 by default; override with `LUFT_SUMMARIZE_MODEL`).
 
 ## Project memory
 
@@ -150,6 +152,7 @@ A good `AGENTS.md` is short and concrete: project conventions, how to run tests,
 | `-plan-model` | `z-ai/glm-5.2` | Model for the plan subagent (env: `LUFT_PLAN_MODEL`) |
 | `-no-subagents` | false | Disable the explore and plan tools |
 | `-no-fetch` | false | Disable the native `web_fetch` tool |
+| `-no-search` | false | Disable the OpenRouter `web_search` provider tool |
 | `-bash` | `restricted` | `restricted` \| `standard` \| `unrestricted` |
 | `-yes` | false | Auto-approve every confirmation prompt |
 | `-max-iter` | 30 | Max model calls per user turn |
@@ -162,6 +165,16 @@ A good `AGENTS.md` is short and concrete: project conventions, how to run tests,
 - **`unrestricted`** (confirmation required): only the timeout (30s) and output cap (64 KiB) apply.
 
 You can pair any mode with `-yes` to auto-approve, e.g. for headless runs.
+
+### Confirmation prompts
+
+Edits (`str_replace_based_edit_tool`, `multi_edit`) and shell (in `standard`/`unrestricted` modes) prompt for approval on stderr with a diff/argument preview. Answer:
+
+- **`y`** — approve this one call
+- **`a`** — approve every call to *this tool* for the rest of the session (e.g. trust all edits once you're confident, while still confirming shell)
+- **`N`** (default) — reject; the model is told it wasn't approved and continues
+
+`-yes` skips all prompts including dangerous shell, so prefer the sticky **`a`** for interactive runs.
 
 ## Slash commands
 
@@ -225,7 +238,7 @@ The main agent should call `plan` to delegate the design, then summarise back.
 
 - SHA-based file-content dedup (re-reads cost full tokens today)
 - Cheap-tier tool-result compression for oversized outputs
-- Auto-compaction at a context-window threshold
+- A configurable auto-summarize threshold (today it's fixed at ~120K tokens)
 - Persistent codebase index across sessions
 - Speculative inspection while the model is drafting
 - OAuth / Claude subscription auth (API key only)

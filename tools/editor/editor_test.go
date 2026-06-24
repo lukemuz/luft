@@ -48,6 +48,79 @@ func TestCreateAndView(t *testing.T) {
 	}
 }
 
+func TestMultiEditAppliesAllInOrder(t *testing.T) {
+	e, dir := mkEditor(t)
+	if _, err := call(t, e, editorInput{Command: "create", Path: "f.txt", FileText: "alpha beta gamma"}); err != nil {
+		t.Fatal(err)
+	}
+	in := multiEditInput{Path: "f.txt"}
+	in.Edits = append(in.Edits,
+		struct {
+			OldStr string `json:"old_str"`
+			NewStr string `json:"new_str"`
+		}{OldStr: "alpha", NewStr: "ALPHA"},
+		struct {
+			OldStr string `json:"old_str"`
+			NewStr string `json:"new_str"`
+		}{OldStr: "ALPHA beta", NewStr: "ALPHA-BETA"}, // depends on the first edit's result
+	)
+	out, err := e.multiEdit(in)
+	if err != nil {
+		t.Fatalf("multiEdit: %v", err)
+	}
+	if !strings.Contains(out, "2 replacements") {
+		t.Fatalf("unexpected summary: %q", out)
+	}
+	body, _ := os.ReadFile(filepath.Join(dir, "f.txt"))
+	if string(body) != "ALPHA-BETA gamma" {
+		t.Fatalf("file body: %q", body)
+	}
+}
+
+func TestMultiEditAtomicOnFailure(t *testing.T) {
+	e, dir := mkEditor(t)
+	if _, err := call(t, e, editorInput{Command: "create", Path: "g.txt", FileText: "one two three"}); err != nil {
+		t.Fatal(err)
+	}
+	in := multiEditInput{Path: "g.txt"}
+	in.Edits = append(in.Edits,
+		struct {
+			OldStr string `json:"old_str"`
+			NewStr string `json:"new_str"`
+		}{OldStr: "one", NewStr: "1"},
+		struct {
+			OldStr string `json:"old_str"`
+			NewStr string `json:"new_str"`
+		}{OldStr: "MISSING", NewStr: "x"}, // fails — whole op must abort
+	)
+	if _, err := e.multiEdit(in); err == nil {
+		t.Fatal("expected error when an edit does not match")
+	}
+	body, _ := os.ReadFile(filepath.Join(dir, "g.txt"))
+	if string(body) != "one two three" {
+		t.Fatalf("file should be untouched, got: %q", body)
+	}
+}
+
+func TestMultiEditRejectsNonUnique(t *testing.T) {
+	e, dir := mkEditor(t)
+	if _, err := call(t, e, editorInput{Command: "create", Path: "h.txt", FileText: "x x x"}); err != nil {
+		t.Fatal(err)
+	}
+	in := multiEditInput{Path: "h.txt"}
+	in.Edits = append(in.Edits, struct {
+		OldStr string `json:"old_str"`
+		NewStr string `json:"new_str"`
+	}{OldStr: "x", NewStr: "y"})
+	if _, err := e.multiEdit(in); err == nil {
+		t.Fatal("expected non-unique old_str to be rejected")
+	}
+	body, _ := os.ReadFile(filepath.Join(dir, "h.txt"))
+	if string(body) != "x x x" {
+		t.Fatalf("file should be untouched, got: %q", body)
+	}
+}
+
 func TestCreateRefusesOverwrite(t *testing.T) {
 	e, _ := mkEditor(t)
 	if _, err := call(t, e, editorInput{Command: "create", Path: "a.txt", FileText: "x"}); err != nil {
