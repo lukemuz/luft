@@ -127,6 +127,10 @@ Two things make this fast and cheap:
 
 2. **Subagent context isolation.** When `explore` runs a 30-file investigation, all that searching and reading happens in the subagent's loop and dies with it. Only the textual summary returns to the main agent.
 
+3. **Re-read dedup.** Reading the same file twice with the same arguments returns a short "unchanged" notice instead of the full content again (the tool still runs, so a changed file always returns fresh content). Pass a line range to force a fresh read if you need it.
+
+4. **Oversized-output compression.** `bash` output above `-result-budget` bytes (default 12K) is condensed by the summarizer model to its errors, failures, and final status before it lands in context — so a 50K test log doesn't cost 50K of tokens. Set `-result-budget 0` to disable and fall back to plain truncation. File reads are never compressed (you need them verbatim to edit correctly).
+
 Context is managed two ways. **Automatically:** before each model call, history over ~750K tokens is trimmed and the trimmed span is replaced by a compact summary (not silently dropped) using the summarizer model — so long autonomous runs degrade gracefully instead of losing the middle of their own work. The threshold leaves headroom under the 1M-token windows of the default models. **Manually:** run `/compact` (see below) any time to compress older turns yourself. Both paths use the summarizer (glm-5.2 by default; override with `LUFT_SUMMARIZE_MODEL`).
 
 ## Project memory
@@ -156,6 +160,8 @@ A good `AGENTS.md` is short and concrete: project conventions, how to run tests,
 | `-bash` | `restricted` | `restricted` \| `standard` \| `unrestricted` |
 | `-yes` | false | Auto-approve every confirmation prompt |
 | `-max-iter` | 30 | Max model calls per user turn |
+| `-context-budget` | `750000` | Token budget before automatic in-loop summarization kicks in (env: `LUFT_CONTEXT_BUDGET`) |
+| `-result-budget` | `12000` | Byte threshold above which noisy `bash` output is summarized; `0` disables (env: `LUFT_RESULT_BUDGET`) |
 | `-log` | (off) | JSONL session log path. Use `-log auto` to write under `~/.config/luft/sessions/<timestamp>.jsonl`, or pass an explicit path. |
 
 ### Bash safety modes
@@ -236,9 +242,7 @@ The main agent should call `plan` to delegate the design, then summarise back.
 
 ## What's not here yet
 
-- SHA-based file-content dedup (re-reads cost full tokens today)
-- Cheap-tier tool-result compression for oversized outputs
-- A configurable auto-summarize threshold (today it's fixed at ~750K tokens)
+- Persistent / resumable sessions across restarts (history dies on exit today)
 - Persistent codebase index across sessions
 - Speculative inspection while the model is drafting
 - OAuth / Claude subscription auth (API key only)

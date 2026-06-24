@@ -37,9 +37,13 @@
 //	-explore-model  model used for the explore subagent (default google/gemini-3.5-flash)
 //	-plan-model     model used for the plan subagent (default z-ai/glm-5.2)
 //	-no-subagents   disable the explore and plan subagent tools
+//	-no-fetch       disable the native web_fetch tool
+//	-no-search      disable the OpenRouter web_search provider tool
 //	-bash           bash safety mode: restricted | standard | unrestricted
 //	-yes            auto-approve every confirmation prompt
 //	-max-iter       max model calls per turn (default 30)
+//	-context-budget token budget before automatic summarization (default 750000)
+//	-result-budget  byte threshold above which bash output is summarized (default 12000; 0 disables)
 //	-version        print version and exit
 //
 // REPL commands:
@@ -61,6 +65,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -97,6 +102,8 @@ Available tools:
 - explore (when available): bounded research specialist on a fast, cheap model — repo inspection or well-scoped Q&A (provided context, fetched docs, web search, or its own knowledge); returns a concise summary with file dumps and fetches kept out of your context
 - plan (when available): design specialist running in a fresh, focused context — get a structured plan before non-trivial multi-file edits, interface changes, or when stuck on a hypothesis
 - now: current time
+
+Two automatic context savers may alter tool results: re-issuing an identical read returns a brief "unchanged" notice instead of the full content (trust your earlier read, or pass a line range to force a fresh one), and very large command output is condensed to its errors and final status. Both preserve correctness-relevant detail.
 
 # Working effectively
 
@@ -176,6 +183,8 @@ func main() {
 	bashMode := flag.String("bash", "restricted", "bash safety mode: restricted | standard | unrestricted")
 	autoYes := flag.Bool("yes", false, "auto-approve every confirmation prompt")
 	maxIter := flag.Int("max-iter", 30, "max model calls per turn")
+	contextBudget := flag.Int("context-budget", envOrInt("LUFT_CONTEXT_BUDGET", 750_000), "token budget before automatic in-loop summarization (env: LUFT_CONTEXT_BUDGET)")
+	resultBudget := flag.Int("result-budget", envOrInt("LUFT_RESULT_BUDGET", 12_000), "byte threshold above which noisy bash output is summarized; 0 disables (env: LUFT_RESULT_BUDGET)")
 	logPath := flag.String("log", "", "JSONL session log path. Pass `auto` to write under ~/.config/luft/sessions/")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -227,6 +236,12 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	confirm := makeConfirmer(*autoYes)
+
+	// Summarizer for /compact, automatic in-loop trimming, and oversized-
+	// result compression. Defaults to glm-5.2 (the main-tier model); override
+	// via LUFT_SUMMARIZE_MODEL to point it at a cheaper slug. Derived from
+	// mainClient after the recorder is attached so its calls log too.
+	summarizer := mainClient.WithModel(envOr("LUFT_SUMMARIZE_MODEL", "z-ai/glm-5.2"))
 
 	// --- shared building blocks --------------------------------------------
 
@@ -342,17 +357,39 @@ func main() {
 	}
 	editorBindings := ed.Toolset().Bindings
 
-	editTools := luft.Tools(append(mainBashBindings, editorBindings...)...).Wrap(
+	// bash gets summarizing compression (build/test logs are the main source
+	// of oversized, noisy output); the editor does not — its output is verbatim
+	// file content the model needs intact to write correct edits.
+	bashMiddleware := []luft.Middleware{
+		luft.WithConfirmation(confirm),
+		luft.WithTimeout(60 * time.Second),
+	}
+	if *resultBudget > 0 {
+		bashMiddleware = append(bashMiddleware, summarizingResultLimit(summarizer, *resultBudget))
+	}
+	bashMiddleware = append(bashMiddleware,
+		luft.WithResultLimit(64*1024),
+		luft.WithLogging(logger),
+	)
+	bashTools := luft.Tools(mainBashBindings...).Wrap(bashMiddleware...)
+	editorTools := luft.Tools(editorBindings...).Wrap(
 		luft.WithConfirmation(confirm),
 		luft.WithTimeout(60*time.Second),
 		luft.WithResultLimit(64*1024),
 		luft.WithLogging(logger),
 	)
+	editTools := luft.MustJoin(bashTools, editorTools)
 
 	// --- main agent assembly ----------------------------------------------
 
+	// The main agent's read tools carry SHA-based dedup so re-reading an
+	// unchanged file returns a short notice instead of paying full tokens
+	// again. roTools itself stays un-deduped for batch/explore, which have
+	// their own contexts and must not share this cache.
+	mainReadTools := roTools.Wrap(dedupReads(512))
+
 	mainTools := luft.MustJoin(
-		roTools,
+		mainReadTools,
 		luft.Tools(roBatchBinding),
 		editTools,
 		todo.New().Toolset(),
@@ -361,17 +398,12 @@ func main() {
 	).CacheLast(luft.Ephemeral()). // cache the entire tool block — stable per session
 		WithProviderTools(searchTools...)
 
-	// Summarizer for /compact and for automatic in-loop trimming. Defaults to
-	// glm-5.2 (the main-tier model); override via LUFT_SUMMARIZE_MODEL to point
-	// it at a cheaper slug.
-	summarizer := mainClient.WithModel(envOr("LUFT_SUMMARIZE_MODEL", "z-ai/glm-5.2"))
-
 	agent := luft.Agent{
 		Client: mainClient,
 		System: withMemory(mainSystemPrompt),
 		Tools:  mainTools,
 		Context: luft.ContextManager{
-			MaxTokens:  750_000,
+			MaxTokens:  *contextBudget,
 			KeepFirst:  1,
 			KeepRecent: 30,
 			// Without a Summarizer, mid-turn trimming silently DROPS the middle
@@ -408,6 +440,11 @@ func main() {
 		searchStatus = dim("off")
 	}
 	row("web search", searchStatus)
+	compressStatus := dim("off")
+	if *resultBudget > 0 {
+		compressStatus = fmt.Sprintf("%s %s", green("on"), grey(fmt.Sprintf("(>%d B)", *resultBudget)))
+	}
+	row("compress", compressStatus)
 	row("dir", abs)
 	if resolvedLog != "" {
 		row("log", resolvedLog)
@@ -525,6 +562,17 @@ func compactJSON(raw json.RawMessage) string {
 func envOr(name, fallback string) string {
 	if v := os.Getenv(name); v != "" {
 		return v
+	}
+	return fallback
+}
+
+// envOrInt is the integer counterpart of envOr. A non-numeric value falls
+// back rather than erroring, so a typo in the environment can't abort startup.
+func envOrInt(name string, fallback int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return fallback
 }
