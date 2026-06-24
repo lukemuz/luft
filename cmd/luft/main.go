@@ -371,7 +371,7 @@ func main() {
 		System: withMemory(mainSystemPrompt),
 		Tools:  mainTools,
 		Context: luft.ContextManager{
-			MaxTokens:  120_000,
+			MaxTokens:  750_000,
 			KeepFirst:  1,
 			KeepRecent: 30,
 			// Without a Summarizer, mid-turn trimming silently DROPS the middle

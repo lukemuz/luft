@@ -127,7 +127,7 @@ Two things make this fast and cheap:
 
 2. **Subagent context isolation.** When `explore` runs a 30-file investigation, all that searching and reading happens in the subagent's loop and dies with it. Only the textual summary returns to the main agent.
 
-Context is managed two ways. **Automatically:** before each model call, history over ~120K tokens is trimmed and the trimmed span is replaced by a compact summary (not silently dropped) using the summarizer model — so long autonomous runs degrade gracefully instead of losing the middle of their own work. **Manually:** run `/compact` (see below) any time to compress older turns yourself. Both paths use the summarizer (glm-5.2 by default; override with `LUFT_SUMMARIZE_MODEL`).
+Context is managed two ways. **Automatically:** before each model call, history over ~750K tokens is trimmed and the trimmed span is replaced by a compact summary (not silently dropped) using the summarizer model — so long autonomous runs degrade gracefully instead of losing the middle of their own work. The threshold leaves headroom under the 1M-token windows of the default models. **Manually:** run `/compact` (see below) any time to compress older turns yourself. Both paths use the summarizer (glm-5.2 by default; override with `LUFT_SUMMARIZE_MODEL`).
 
 ## Project memory
 
@@ -238,7 +238,7 @@ The main agent should call `plan` to delegate the design, then summarise back.
 
 - SHA-based file-content dedup (re-reads cost full tokens today)
 - Cheap-tier tool-result compression for oversized outputs
-- A configurable auto-summarize threshold (today it's fixed at ~120K tokens)
+- A configurable auto-summarize threshold (today it's fixed at ~750K tokens)
 - Persistent codebase index across sessions
 - Speculative inspection while the model is drafting
 - OAuth / Claude subscription auth (API key only)
