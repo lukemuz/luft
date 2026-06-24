@@ -2,14 +2,14 @@
 //
 // Topology (Phase 2):
 //
-//	main agent           (x-ai/grok-4.3 by default — configurable via -model)
+//	main agent           (z-ai/glm-5.2 by default — configurable via -model)
 //	  ├── direct tools   workspace read-only + trained bash + trained editor
 //	  │                  + todo + clock + batch
-//	  ├── explore        subagent on openai/gpt-oss-120b (-explore-model) —
+//	  ├── explore        subagent on google/gemini-3.5-flash (-explore-model) —
 //	  │                  workspace read-only + restricted bash + batch + clock.
 //	  │                  Used for cheap, parallelisable inspection; its
 //	  │                  iteration history never enters the main context.
-//	  └── plan           subagent on x-ai/grok-4.3 (-plan-model) — read-only
+//	  └── plan           subagent on z-ai/glm-5.2 (-plan-model) — read-only
 //	                     tools, no shell or edits. Used when the main agent
 //	                     wants a focused reasoner for design or hard debugging.
 //
@@ -25,17 +25,17 @@
 // The agent is sandboxed to the current working directory by default.
 // Pass -dir to operate on a different directory.
 //
-// Models default to x-ai/grok-4.3 for the main agent and plan subagent,
-// and openai/gpt-oss-120b for the explore subagent. Override with
+// Models default to z-ai/glm-5.2 for the main agent and plan subagent,
+// and google/gemini-3.5-flash for the explore subagent. Override with
 // -model / -explore-model / -plan-model to use any OpenRouter-supported
 // model id.
 //
 // Flags:
 //
 //	-dir            working directory the agent is sandboxed to (default cwd)
-//	-model          main-agent model id (default x-ai/grok-4.3)
-//	-explore-model  model used for the explore subagent (default openai/gpt-oss-120b)
-//	-plan-model     model used for the plan subagent (default x-ai/grok-4.3)
+//	-model          main-agent model id (default z-ai/glm-5.2)
+//	-explore-model  model used for the explore subagent (default google/gemini-3.5-flash)
+//	-plan-model     model used for the plan subagent (default z-ai/glm-5.2)
 //	-no-subagents   disable the explore and plan subagent tools
 //	-bash           bash safety mode: restricted | standard | unrestricted
 //	-yes            auto-approve every confirmation prompt
@@ -164,9 +164,9 @@ Operating principles:
 
 func main() {
 	dir := flag.String("dir", ".", "working directory the agent is sandboxed to (defaults to the current directory)")
-	model := flag.String("model", envOr("LUFT_MODEL", "x-ai/grok-4.3"), "main-agent model id (any OpenRouter slug; env: LUFT_MODEL)")
-	exploreModel := flag.String("explore-model", envOr("LUFT_EXPLORE_MODEL", "openai/gpt-oss-120b"), "model id for the explore subagent (env: LUFT_EXPLORE_MODEL)")
-	planModel := flag.String("plan-model", envOr("LUFT_PLAN_MODEL", "x-ai/grok-4.3"), "model id for the plan subagent (env: LUFT_PLAN_MODEL)")
+	model := flag.String("model", envOr("LUFT_MODEL", "z-ai/glm-5.2"), "main-agent model id (any OpenRouter slug; env: LUFT_MODEL)")
+	exploreModel := flag.String("explore-model", envOr("LUFT_EXPLORE_MODEL", "google/gemini-3.5-flash"), "model id for the explore subagent (env: LUFT_EXPLORE_MODEL)")
+	planModel := flag.String("plan-model", envOr("LUFT_PLAN_MODEL", "z-ai/glm-5.2"), "model id for the plan subagent (env: LUFT_PLAN_MODEL)")
 	noSubagents := flag.Bool("no-subagents", false, "disable explore and plan subagent tools")
 	noFetch := flag.Bool("no-fetch", false, "disable the native web_fetch tool")
 	bashMode := flag.String("bash", "restricted", "bash safety mode: restricted | standard | unrestricted")
@@ -352,9 +352,9 @@ func main() {
 		MaxIter: *maxIter,
 	}
 
-	// Summarizer for /compact defaults to grok-4.3 (the main-tier model);
+	// Summarizer for /compact defaults to glm-5.2 (the main-tier model);
 	// override via LUFT_SUMMARIZE_MODEL to point it at a cheaper slug.
-	summarizer := mainClient.WithModel(envOr("LUFT_SUMMARIZE_MODEL", "x-ai/grok-4.3"))
+	summarizer := mainClient.WithModel(envOr("LUFT_SUMMARIZE_MODEL", "z-ai/glm-5.2"))
 
 	// --- run ---------------------------------------------------------------
 
