@@ -9,18 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- OpenRouter: pin upstream providers per-model with an `@provider` suffix on the
-  model slug — e.g. `openai/gpt-oss-120b@cerebras`, or `…@cerebras,groq` for an
-  ordered preference. The OpenRouter provider strips the suffix and sets the
-  `provider.order` routing field (fallbacks stay on, so an unavailable upstream
-  degrades gracefully). `openai.CompatibleCall`/`CompatibleStream` gained a
-  variadic `CompatibleOption` (`WithProviderRouting`) to carry it without
-  widening the core request type.
-- CLI: the explore subagent now defaults to `openai/gpt-oss-120b@cerebras` — a
-  small model served at very high throughput via Cerebras — and its tool
-  description tells the main agent it's an extremely fast/cheap option to lean on
-  and fan out in parallel.
-
 - CLI: an `implement` subagent — a clone of the main agent with the full editing
   toolset (read, `str_replace`/`multi_edit`, bash, batch, todo, web) that carries
   one well-scoped change to completion in its own isolated context and returns a

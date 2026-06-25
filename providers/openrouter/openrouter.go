@@ -2,11 +2,9 @@ package openrouter
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/lukemuz/luft"
@@ -81,8 +79,6 @@ func (p *Provider) Call(ctx context.Context, req luft.ProviderRequest) (luft.Pro
 	if err := validateProviderTools(req.ProviderTools); err != nil {
 		return luft.ProviderResponse{}, err
 	}
-	var opt []openai.CompatibleOption
-	req.Model, opt = splitProviderRouting(req.Model)
 	return openai.CompatibleCall(
 		ctx,
 		p.cfg.HTTPClient,
@@ -91,7 +87,6 @@ func (p *Provider) Call(ctx context.Context, req luft.ProviderRequest) (luft.Pro
 		req,
 		true,
 		true,
-		opt...,
 	)
 }
 
@@ -101,8 +96,6 @@ func (p *Provider) Stream(ctx context.Context, req luft.ProviderRequest, onDelta
 	if err := validateProviderTools(req.ProviderTools); err != nil {
 		return luft.ProviderResponse{}, err
 	}
-	var opt []openai.CompatibleOption
-	req.Model, opt = splitProviderRouting(req.Model)
 	return openai.CompatibleStream(
 		ctx,
 		p.cfg.HTTPClient,
@@ -112,44 +105,7 @@ func (p *Provider) Stream(ctx context.Context, req luft.ProviderRequest, onDelta
 		onDelta,
 		true,
 		true,
-		opt...,
 	)
-}
-
-// splitProviderRouting parses an OpenRouter model string that optionally pins
-// one or more upstream providers with an "@" suffix:
-//
-//	"openai/gpt-oss-120b@cerebras"        → prefer Cerebras
-//	"openai/gpt-oss-120b@cerebras,groq"   → prefer Cerebras, then Groq
-//
-// It returns the bare model id plus a CompatibleOption that sets OpenRouter's
-// provider-routing "order" so those providers are tried first. Fallbacks stay
-// enabled, so an unavailable pinned provider degrades to OpenRouter's normal
-// routing rather than failing the request. Without an "@", no option is
-// returned and the model is unchanged. Provider names are passed through
-// verbatim (OpenRouter matches them case-insensitively).
-func splitProviderRouting(model string) (string, []openai.CompatibleOption) {
-	at := strings.LastIndex(model, "@")
-	if at < 0 {
-		return model, nil
-	}
-	base := strings.TrimSpace(model[:at])
-	var provs []string
-	for _, p := range strings.Split(model[at+1:], ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			provs = append(provs, p)
-		}
-	}
-	if base == "" || len(provs) == 0 {
-		return model, nil // malformed suffix — leave the slug untouched
-	}
-	routing, err := json.Marshal(struct {
-		Order []string `json:"order"`
-	}{Order: provs})
-	if err != nil {
-		return base, nil
-	}
-	return base, []openai.CompatibleOption{openai.WithProviderRouting(routing)}
 }
 
 // validateProviderTools rejects ProviderTool entries tagged for a different
