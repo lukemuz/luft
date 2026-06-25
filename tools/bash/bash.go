@@ -90,6 +90,16 @@ type Config struct {
 	// command string) to the ModeStandard deny-list. Ignored in other
 	// modes.
 	ExtraDeny []string
+
+	// ReportExitError, when true, returns a non-zero exit status or a timeout
+	// as a tool error (is_error) rather than ordinary output. The full
+	// stdout+stderr and the "[exit=N]" header still ride along in the error
+	// message, so the model sees everything — but a failed command is now
+	// unmistakable instead of rendering as a success with the exit code buried
+	// in the text. Default false keeps every result, pass or fail, as plain
+	// output (best for read-only inspection where a non-zero exit, e.g. grep
+	// finding nothing, is informational rather than a failure).
+	ReportExitError bool
 }
 
 // Tool is the bash tool binding.
@@ -270,7 +280,15 @@ func (t *Tool) run(ctx context.Context, in bashInput) (string, error) {
 		header += " timeout=true"
 	}
 	header += "]\n"
-	return header + out, nil
+	result := header + out
+
+	// In strict mode a failure is surfaced as a tool error so the UI marks it
+	// failed and the model can't overlook a buried exit code. The full output
+	// rides along in the message, so nothing is hidden.
+	if t.cfg.ReportExitError && (exit != 0 || timedOut) {
+		return "", fmt.Errorf("%s", strings.TrimRight(result, "\n"))
+	}
+	return result, nil
 }
 
 func (t *Tool) check(cmd string) error {
