@@ -118,11 +118,13 @@ func oneLine(s string) string {
 type spinner struct {
 	w io.Writer
 
-	mu      sync.Mutex
-	running bool
-	label   string
-	stopCh  chan struct{}
-	doneCh  chan struct{}
+	mu        sync.Mutex
+	running   bool
+	suspended bool // held off while an interactive prompt owns the terminal
+	resume    bool // restart on Resume (was running, or a Start arrived while suspended)
+	label     string
+	stopCh    chan struct{}
+	doneCh    chan struct{}
 }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -138,13 +140,19 @@ func (s *spinner) Start(label string) {
 		return
 	}
 	s.mu.Lock()
+	s.label = label
+	if s.suspended {
+		// An interactive prompt owns the terminal; remember that a spin
+		// was wanted and let Resume repaint once the prompt clears.
+		s.resume = true
+		s.mu.Unlock()
+		return
+	}
 	if s.running {
-		s.label = label
 		s.mu.Unlock()
 		return
 	}
 	s.running = true
-	s.label = label
 	s.stopCh = make(chan struct{})
 	s.doneCh = make(chan struct{})
 	s.mu.Unlock()
@@ -157,6 +165,12 @@ func (s *spinner) Stop() {
 	if !useColor {
 		return
 	}
+	s.teardown()
+}
+
+// teardown stops the render goroutine and erases the line. Caller must not
+// hold s.mu. A no-op if the spinner isn't currently running.
+func (s *spinner) teardown() {
 	s.mu.Lock()
 	if !s.running {
 		s.mu.Unlock()
@@ -170,6 +184,48 @@ func (s *spinner) Stop() {
 	// Carriage return + clear-to-end-of-line. Repaint owners write
 	// after this, and the line will be empty.
 	fmt.Fprint(s.w, "\r\x1b[K")
+}
+
+// Suspend halts the spinner and blocks it from repainting until Resume is
+// called. Use it around interactive terminal reads (confirmation prompts):
+// the render goroutine rewrites its line every tick with a carriage return
+// + line-erase, which would otherwise wipe out a prompt as fast as it is
+// printed — making the CLI look hung while it silently waits on stdin.
+// Resume restores whatever spin state was wanted while suspended.
+func (s *spinner) Suspend() {
+	if !useColor {
+		return
+	}
+	s.mu.Lock()
+	if s.suspended {
+		s.mu.Unlock()
+		return
+	}
+	s.suspended = true
+	s.resume = s.running // resume afterward only if it was actually spinning
+	s.mu.Unlock()
+	s.teardown()
+}
+
+// Resume lifts a Suspend. If the spinner was running when suspended (or a
+// Start arrived in the meantime) it restarts with the most recent label.
+func (s *spinner) Resume() {
+	if !useColor {
+		return
+	}
+	s.mu.Lock()
+	if !s.suspended {
+		s.mu.Unlock()
+		return
+	}
+	s.suspended = false
+	resume := s.resume
+	s.resume = false
+	label := s.label
+	s.mu.Unlock()
+	if resume {
+		s.Start(label)
+	}
 }
 
 func (s *spinner) run() {

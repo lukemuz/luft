@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- CLI: an `implement` subagent — a clone of the main agent with the full editing
+  toolset (read, `str_replace`/`multi_edit`, bash, batch, todo, web) that carries
+  one well-scoped change to completion in its own isolated context and returns a
+  summary, keeping its edit/test churn out of the orchestrator's context. It is
+  deliberately non-recursive (no subagents of its own) and its edits/commands flow
+  through the same approval prompt as the main agent. Disable with `-no-implement`;
+  `-no-subagents` disables explore, plan, and implement.
+- CLI: subagent **model tiers**. Subagents share three classes — `powerful`,
+  `medium`, `ultrafast` — set via `-model-powerful` / `-model-medium` /
+  `-model-ultrafast` (env `LUFT_MODEL_*`). Each subagent has a default tier
+  (explore→ultrafast, plan→powerful, implement→medium) and the calling model can
+  request a different tier per call via a new optional `tier` argument on each
+  subagent tool — escalating a hard task or dropping a trivial one. The chosen
+  tier shows on the tool-result line. Defaults: powerful = `z-ai/glm-5.2`,
+  medium = `x-ai/grok-4.3`, ultrafast = `openai/gpt-oss-120b:nitro` (the `:nitro`
+  suffix is OpenRouter's native throughput routing, which lands on Cerebras for
+  this model). `subagent.Config` gained `Tiers []subagent.Tier` + `DefaultTier`.
+
+### Changed
+
+- All subagents (explore, plan, implement) now run through the `Agent` block
+  instead of calling `Loop` directly, so each gets the same in-loop context
+  trimming and summarization the main agent has — a long subagent run is
+  summarized in place rather than risking its context window. `subagent.Config`
+  gained an optional `Context luft.ContextManager` field for this.
+- CLI: the per-subagent model flags `-explore-model` / `-plan-model` /
+  `-implement-model` are replaced by the three shared tier flags above.
+
+### Fixed
+
+- CLI: tool-approval prompts no longer get erased by the activity spinner. The
+  spinner's repaint loop shares stderr with the confirmer, so an `approve?`
+  prompt was wiped every 80ms — the agent looked hung when it was actually
+  waiting on stdin (every edit, and every `bash` in `standard`/`unrestricted`
+  mode, hits this). The confirmer now suspends the spinner while it owns the
+  terminal and resumes it afterward. EOF/closed stdin declines cleanly instead
+  of leaving a dangling prompt line.
+
+### Changed
+
+- CLI: clearer approval prompt with a full key legend `[y/a/A/N]`, and a new
+  `A` ("approve all tools this session") option alongside the existing `a`
+  ("approve all of this tool"). The startup banner now shows an `approve` row
+  so the auto-approve mode (`-yes`) and per-call controls are discoverable.
+
 ## v0.2.0 — 2026-06-07
 
 ### Added

@@ -5,13 +5,24 @@
 //	main agent           (z-ai/glm-5.2 by default — configurable via -model)
 //	  ├── direct tools   workspace read-only + trained bash + trained editor
 //	  │                  + todo + clock + batch
-//	  ├── explore        subagent on google/gemini-3.5-flash (-explore-model) —
+//	  ├── explore        research subagent (default tier: ultrafast) —
 //	  │                  workspace read-only + restricted bash + batch + clock.
 //	  │                  Used for cheap, parallelisable inspection; its
 //	  │                  iteration history never enters the main context.
-//	  └── plan           subagent on z-ai/glm-5.2 (-plan-model) — read-only
-//	                     tools, no shell or edits. Used when the main agent
-//	                     wants a focused reasoner for design or hard debugging.
+//	  ├── plan           design subagent (default tier: powerful) — read-only
+//	  │                  tools, no shell or edits. Used when the main agent
+//	  │                  wants a focused reasoner for design or hard debugging.
+//	  └── implement      editing clone (default tier: medium) — the full editing
+//	                     toolset (read + edit + bash + batch + todo + web) but NO
+//	                     subagents of its own. Carries one well-scoped change to
+//	                     completion in an isolated context and returns a summary;
+//	                     the main agent reviews the diff. Disable with -no-implement.
+//
+// Subagents share three model tiers — powerful / medium / ultrafast (set via
+// -model-powerful / -model-medium / -model-ultrafast). Each subagent has a
+// default tier (above), and the calling model may request a different tier per
+// call via a "tier" argument. All subagents run through the Agent block, so each
+// gets the same in-loop context trimming/summarization the main agent has.
 //
 // The batch tool is also offered to the main agent so it can run several
 // reads/searches concurrently in a single turn without paying for a
@@ -25,18 +36,19 @@
 // The agent is sandboxed to the current working directory by default.
 // Pass -dir to operate on a different directory.
 //
-// Models default to z-ai/glm-5.2 for the main agent and plan subagent,
-// and google/gemini-3.5-flash for the explore subagent. Override with
-// -model / -explore-model / -plan-model to use any OpenRouter-supported
-// model id.
+// The main agent defaults to z-ai/glm-5.2 (-model). Subagent tiers default to
+// z-ai/glm-5.2 (powerful), x-ai/grok-4.3 (medium), and openai/gpt-oss-120b:nitro
+// (ultrafast) — any OpenRouter slug works.
 //
 // Flags:
 //
-//	-dir            working directory the agent is sandboxed to (default cwd)
-//	-model          main-agent model id (default z-ai/glm-5.2)
-//	-explore-model  model used for the explore subagent (default google/gemini-3.5-flash)
-//	-plan-model     model used for the plan subagent (default z-ai/glm-5.2)
-//	-no-subagents   disable the explore and plan subagent tools
+//	-dir             working directory the agent is sandboxed to (default cwd)
+//	-model           main-agent model id (default z-ai/glm-5.2)
+//	-model-powerful  powerful subagent tier (default x-ai/grok-4.3)
+//	-model-medium    medium subagent tier (default z-ai/glm-5.2)
+//	-model-ultrafast ultrafast subagent tier (default openai/gpt-oss-120b:nitro)
+//	-no-subagents    disable all subagent tools (explore, plan, implement)
+//	-no-implement    disable only the implement subagent
 //	-no-fetch       disable the native web_fetch tool
 //	-no-search      disable the OpenRouter web_search provider tool
 //	-bash           bash safety mode: restricted | standard | unrestricted
@@ -60,6 +72,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -88,6 +101,14 @@ import (
 // `go build -ldflags "-X main.version=vX.Y.Z"`.
 var version = "v0.2.0"
 
+// Subagent model-tier names. Subagents share these three classes; the calling
+// model may request one per call, otherwise each subagent uses its role tier.
+const (
+	tierPowerful  = "powerful"
+	tierMedium    = "medium"
+	tierUltrafast = "ultrafast"
+)
+
 const mainSystemPrompt = `You are luft, a fast and economical CLI coding assistant built on the luft toolkit. You operate inside a workspace directory and help the user with software engineering tasks — reading code, making edits, running commands, and reasoning about changes.
 
 Available tools:
@@ -99,20 +120,23 @@ Available tools:
 - batch: run 2+ independent read-only calls in one turn. Default for independent reads/greps/inspections; skip only when a later call depends on an earlier result.
 - web_fetch (when available): download an http(s) URL and return its content as text. HTML is converted to a plain-text approximation; long pages paginate via max_length + start_index. Use this for documentation lookups and inspecting URLs from error messages.
 - web_search (when available): run a web search and get results with citations. Use when you do NOT already have a URL — current library docs, an unfamiliar API, or an error message you want to look up. Pair with web_fetch to read a promising result in full.
-- explore (when available): bounded research specialist on a fast, cheap model — repo inspection or well-scoped Q&A (provided context, fetched docs, web search, or its own knowledge); returns a concise summary with file dumps and fetches kept out of your context
-- plan (when available): design specialist running in a fresh, focused context — get a structured plan before non-trivial multi-file edits, interface changes, or when stuck on a hypothesis
+- explore (when available): bounded research specialist that defaults to the ultrafast tier (a small model at very high throughput — extremely fast and cheap) — repo inspection or well-scoped Q&A (provided context, fetched docs, web search, or its own knowledge); returns a concise summary with file dumps and fetches kept out of your context. Lean on it freely and fan several out in parallel.
+- plan (when available): design specialist on the powerful tier, running in a fresh, focused context — get a structured plan before non-trivial multi-file edits, interface changes, or when stuck on a hypothesis
+- implement (when available): a clone of yourself with the full editing toolset on the medium tier, running in its own clean context — delegate a well-scoped, independently-verifiable change you've already designed and get back a summary of what it did (its edit/test churn stays out of your context). You still review its diff.
 - now: current time
+
+Each subagent (explore, plan, implement) runs on one of three model tiers — powerful (strongest reasoning and benchmarks, but slowest/priciest — reserve for hard tasks), medium (nearly as capable, faster and cheaper), ultrafast (fastest and cheapest, small model) — and defaults to the tier noted above. Pass an optional "tier" argument to override per call: escalate to powerful for a genuinely hard task, or drop to ultrafast for something trivial. When unsure, omit it and take the default.
 
 Two automatic context savers may alter tool results: re-issuing an identical read returns a brief "unchanged" notice instead of the full content (trust your earlier read, or pass a line range to force a fresh one), and very large command output is condensed to its errors and final status. Both preserve correctness-relevant detail.
 
 # Working effectively
 
-1. Default to the explore subagent for breadth — code you need to understand but won't necessarily edit: repo inspection (understand a module, find all usages, audit a pattern) and well-scoped Q&A (look up a stdlib function, summarise an RFC, answer a factual question with provided context). It's cheap, its file dumps and fetches stay out of your context, and you receive only its summary.
+1. Default to the explore subagent for breadth — code you need to understand but won't necessarily edit: repo inspection (understand a module, find all usages, audit a pattern) and well-scoped Q&A (look up a stdlib function, summarise an RFC, answer a factual question with provided context). It's cheap, its file dumps and fetches stay out of your context, and you receive only its summary. Choose explore over batch when the search is broad or open-ended and you only need the conclusion; choose batch when you need the raw file contents in your own context to act on.
 2. Read it yourself for (a) tight, surgical lookups (one file, one symbol) and (b) ANY code you are about to edit. explore's summary comes from a cheaper model: it loses detail you need to write a correct change, and you can't cheaply verify what you never saw. Delegating breadth is a good trade; delegating the reading of code you're about to modify is not.
 3. Default to batch for independent read-only work. Each tool call is a full LLM round trip, so if you'd otherwise issue 2+ reads/greps/inspections that don't depend on each other, batch them. Issue solo calls only when a later call's input depends on an earlier call's output (e.g. grep first, then read only the files it returned).
 4. Call plan as a routine first step for substantive design work — non-trivial multi-file changes, interface or data-shape changes, decisions with multiple plausible tradeoffs, or stuck debugging (2+ turns without a clear hypothesis). Pass the question with the context you've gathered. Skip plan for routine single-file changes or when your approach is already clear.
-5. Brief subagents like a colleague who just walked in: state the goal, the relevant context you've already gathered (file paths, line numbers, error messages, what you've ruled out), and what shape of answer you need. Terse one-line prompts produce shallow, generic work.
-6. For multi-step tasks, call todo_write at the start and update it as you go. Keep at most one item in_progress.
+5. Delegate to implement when a change is well-scoped and independently verifiable and keeping its churn out of your context is worth it — a mechanical refactor repeated across files, or a self-contained unit you can hand off with a precise spec and a clear "done when tests pass". Do it yourself when the change is central to what you're reasoning about, depends on decisions you haven't made, or is small enough that writing the spec costs more than the edit. Either way you own the review — read implement's diff before trusting it.
+6. Brief subagents like a colleague who just walked in: state the goal, the relevant context you've already gathered (file paths, line numbers, error messages, what you've ruled out), and what shape of answer you need. Terse one-line prompts produce shallow, generic work. For multi-step tasks, call todo_write at the start and update it as you go, keeping at most one item in_progress.
 
 # Writing code
 
@@ -172,12 +196,33 @@ Operating principles:
 3. Return a structured plan: numbered steps, files to touch, risks. Keep it implementable, not aspirational.
 4. Be honest about what you don't know.`
 
+const implementSystemPrompt = `You are luft's implement specialist — a focused engineer who carries one well-scoped change to completion in your own clean context.
+
+You receive a self-contained task from an orchestrator that has already done the surrounding design and reading. You have the full editing toolset: read-only filesystem inspection, str_replace_based_edit_tool and multi_edit for changes, bash for builds/tests/git, batch for read-only fan-out, todo for tracking multi-step work, and web_fetch/web_search when available. You have NO subagents — do the work yourself.
+
+Operating principles:
+1. Read before you write. Open every file you are about to edit; match the conventions of the surrounding code (naming, error handling, imports, layout). Read a neighbour before introducing a new pattern.
+2. Stay inside the task. Make the change you were asked for and nothing more — no opportunistic refactors, no scaffolding for hypothetical futures, no backwards-compat shims for code you can just change. Three similar lines beat a premature abstraction.
+3. Write no comments unless the *why* is non-obvious (a hidden constraint, a subtle invariant, a workaround). Don't narrate *what* the code does.
+4. Watch for security issues (injection, path traversal, the OWASP top 10) and fix any you introduce immediately.
+5. Verify before you report: build, type-check, and run the affected tests via bash. Review your own diff with git diff. If you can't exercise the change in this environment, say so plainly rather than claiming success.
+6. If the same approach fails twice, stop and reconsider rather than trying a third variation — report what you tried, what failed, and your current hypothesis.
+7. Act with care. Local reversible actions (edits, reads, tests, builds) are free — just do them. But do NOT take destructive or shared-state actions unless the task explicitly calls for them: deleting files/branches, dropping data, force-pushing, rewriting history, committing, pushing, or downgrading dependencies. Never use a destructive shortcut to get past a failing check (no --no-verify, no skipping hooks). If the task seems to require one of these, do the reversible work and flag the remaining step in your summary rather than performing it.
+
+Your final message is the ONLY thing the orchestrator sees — your iteration history is discarded. Return a tight summary: the files you changed and how (path:line where useful), the key decisions you made, the exact verification you ran and its result, and anything you could NOT verify or that remains open. The orchestrator will review your actual diff, so be precise about what it will find.`
+
 func main() {
 	dir := flag.String("dir", ".", "working directory the agent is sandboxed to (defaults to the current directory)")
 	model := flag.String("model", envOr("LUFT_MODEL", "z-ai/glm-5.2"), "main-agent model id (any OpenRouter slug; env: LUFT_MODEL)")
-	exploreModel := flag.String("explore-model", envOr("LUFT_EXPLORE_MODEL", "google/gemini-3.5-flash"), "model id for the explore subagent (env: LUFT_EXPLORE_MODEL)")
-	planModel := flag.String("plan-model", envOr("LUFT_PLAN_MODEL", "z-ai/glm-5.2"), "model id for the plan subagent (env: LUFT_PLAN_MODEL)")
-	noSubagents := flag.Bool("no-subagents", false, "disable explore and plan subagent tools")
+	// Subagents pick from three shared model tiers; the calling model may
+	// request a tier per call (see subagent tool schemas), otherwise each
+	// subagent uses its role default (explore→ultrafast, plan→powerful,
+	// implement→medium).
+	powerfulModel := flag.String("model-powerful", envOr("LUFT_MODEL_POWERFUL", "z-ai/glm-5.2"), "powerful tier: strong reasoning model for subagents (env: LUFT_MODEL_POWERFUL)")
+	mediumModel := flag.String("model-medium", envOr("LUFT_MODEL_MEDIUM", "x-ai/grok-4.3"), "medium tier: fast, high-quality model for subagents (env: LUFT_MODEL_MEDIUM)")
+	ultrafastModel := flag.String("model-ultrafast", envOr("LUFT_MODEL_ULTRAFAST", "openai/gpt-oss-120b:nitro"), "ultrafast tier: small model at very high throughput for subagents (env: LUFT_MODEL_ULTRAFAST)")
+	noSubagents := flag.Bool("no-subagents", false, "disable all subagent tools (explore, plan, implement)")
+	noImplement := flag.Bool("no-implement", false, "disable only the implement subagent (the editing clone)")
 	noFetch := flag.Bool("no-fetch", false, "disable the native web_fetch tool")
 	noSearch := flag.Bool("no-search", false, "disable the OpenRouter web_search provider tool")
 	bashMode := flag.String("bash", "restricted", "bash safety mode: restricted | standard | unrestricted")
@@ -235,13 +280,28 @@ func main() {
 	}()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	confirm := makeConfirmer(*autoYes)
+
+	// One spinner for the whole session, shared between the REPL turn loop
+	// and the confirmer so the confirmer can suspend it while it owns the
+	// terminal for an approval prompt.
+	sp := newSpinner(os.Stderr)
+	confirm := makeConfirmer(*autoYes, sp, os.Stdin, os.Stderr)
 
 	// Summarizer for /compact, automatic in-loop trimming, and oversized-
 	// result compression. Defaults to glm-5.2 (the main-tier model); override
 	// via LUFT_SUMMARIZE_MODEL to point it at a cheaper slug. Derived from
 	// mainClient after the recorder is attached so its calls log too.
 	summarizer := mainClient.WithModel(envOr("LUFT_SUMMARIZE_MODEL", "z-ai/glm-5.2"))
+
+	// The three shared subagent model tiers. Derived from mainClient (after the
+	// recorder is attached) so every tier's calls log to the same session file.
+	// A subagent picks a tier per call via its "tier" argument, defaulting to
+	// its role tier. Descriptions are advertised to the calling model.
+	tiers := []subagent.Tier{
+		{Name: tierPowerful, Description: "strongest reasoning and best benchmarks, but slowest and priciest — reserve for genuinely hard analysis, design, or debugging", Client: mainClient.WithModel(*powerfulModel)},
+		{Name: tierMedium, Description: "nearly as capable but faster and cheaper — a strong general-purpose class for real work", Client: mainClient.WithModel(*mediumModel)},
+		{Name: tierUltrafast, Description: "a small model at very high throughput — fastest and cheapest, for quick reads, lookups, and summaries", Client: mainClient.WithModel(*ultrafastModel)},
+	}
 
 	// --- shared building blocks --------------------------------------------
 
@@ -310,31 +370,44 @@ func main() {
 
 	// --- subagent tools ----------------------------------------------------
 
+	// Every subagent runs through the Agent block (see subagent.New), so they
+	// share the main agent's in-loop context management: a long subagent run is
+	// trimmed and summarized in place rather than blowing its context window.
+	// The summarizer client is the same one the main loop uses.
+	subagentContext := luft.ContextManager{
+		MaxTokens:  *contextBudget,
+		KeepFirst:  1,
+		KeepRecent: 30,
+		Summarizer: makeAutoSummarizer(summarizer),
+	}
+
 	var subagentBindings []luft.ToolBinding
 	if !*noSubagents {
-		exploreClient := mainClient.WithModel(*exploreModel)
 		exploreTools := luft.MustJoin(roTools, subBashToolset, webTools, luft.Tools(roBatchBinding)).
 			CacheLast(luft.Ephemeral()).
 			WithProviderTools(searchTools...)
 		exploreBinding, err := subagent.New(subagent.Config{
 			Name:        "explore",
-			Description: "Delegate a bounded research task to a fast, cheap specialist. Two main shapes: (a) repo research — find callers, audit a pattern, summarise a module, locate references; (b) bounded Q&A — answer a well-scoped question from provided context, fetched docs, web search, or general knowledge (e.g. 'what does this stdlib function do', 'summarise this RFC's caching rules'). The specialist has read-only filesystem tools, restricted bash, web_fetch, web_search, and batch fan-out; it returns a concise summary and its iteration history stays out of your context. Pass a self-contained task description with any context the specialist needs. Use for breadth — surveys, usage audits, well-scoped research. For the specific code you are about to edit, read it yourself: the summary loses detail you need to write a correct change, and you can't cheaply verify what you didn't see.",
-			Client:      exploreClient,
+			Description: "Delegate a bounded research task to an EXTREMELY fast, cheap specialist (defaults to the ultrafast tier — a small model served at very high throughput, so it returns in a fraction of the time and cost of a main-model turn). Lean on it freely and prefer firing several in parallel over reading widely yourself. Two main shapes: (a) repo research — find callers, audit a pattern, summarise a module, locate references; (b) bounded Q&A — answer a well-scoped question from provided context, fetched docs, web search, or general knowledge (e.g. 'what does this stdlib function do', 'summarise this RFC's caching rules'). The specialist has read-only filesystem tools, restricted bash, web_fetch, web_search, and batch fan-out; it returns a concise summary and its iteration history stays out of your context. Pass a self-contained task description with any context it needs; raise `tier` for research that needs real reasoning. For the specific code you are about to edit, read it yourself: a small-model summary loses detail you need to write a correct change, and you can't cheaply verify what you didn't see.",
+			Tiers:       tiers,
+			DefaultTier: tierUltrafast,
 			System:      withMemory(exploreSystemPrompt),
 			Tools:       exploreTools,
+			Context:     subagentContext,
 			MaxIter:     50,
 		})
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		planClient := mainClient.WithModel(*planModel)
 		planBinding, err := subagent.New(subagent.Config{
 			Name:        "plan",
-			Description: "Delegate design and architecture work to a focused planning specialist running in its own clean context (point -plan-model at a stronger reasoning model if desired). Get a structured plan before editing when work touches 3+ files, changes a public interface or shared data shape, has multiple plausible tradeoffs, or you've spent 2+ debugging turns without a clear hypothesis. Pass the question PLUS context you've gathered (file excerpts, error messages, prior attempts). Returns a numbered plan with files to touch and risks. Skip for routine single-file changes or when your approach is already clear.",
-			Client:      planClient,
+			Description: "Delegate design and architecture work to a focused planning specialist running in its own clean context (defaults to the powerful tier — a strong reasoning model). Get a structured plan before editing when work touches 3+ files, changes a public interface or shared data shape, has multiple plausible tradeoffs, or you've spent 2+ debugging turns without a clear hypothesis. Pass the question PLUS context you've gathered (file excerpts, error messages, prior attempts). Returns a numbered plan with files to touch and risks. Skip for routine single-file changes or when your approach is already clear; drop `tier` to a faster class for lightweight planning.",
+			Tiers:       tiers,
+			DefaultTier: tierPowerful,
 			System:      withMemory(planSystemPrompt),
 			Tools:       roTools.CacheLast(luft.Ephemeral()),
+			Context:     subagentContext,
 			MaxIter:     25,
 		})
 		if err != nil {
@@ -380,6 +453,38 @@ func main() {
 	)
 	editTools := luft.MustJoin(bashTools, editorTools)
 
+	// --- implement subagent ------------------------------------------------
+
+	// A clone of the main agent that carries one well-scoped change to
+	// completion in an isolated context. It shares the editing toolset (so its
+	// edits and shell commands flow through the same confirmer) but is NOT
+	// given the subagent bindings — subagents must not recurse. Built here,
+	// after editTools, and appended to the subagent set the main agent sees.
+	if !*noSubagents && !*noImplement {
+		implementTools := luft.MustJoin(
+			roTools,
+			luft.Tools(roBatchBinding),
+			editTools,
+			todo.New().Toolset(),
+			webTools,
+		).CacheLast(luft.Ephemeral()).
+			WithProviderTools(searchTools...)
+		implementBinding, err := subagent.New(subagent.Config{
+			Name:        "implement",
+			Description: "Delegate a well-scoped, self-contained code change to a clone of yourself running in its own clean context (defaults to the medium tier — fast and high-quality). It has the full editing toolset (read, str_replace/multi_edit, bash, batch, todo, web) but no subagents, and returns a concise summary of what it changed while keeping its edit/grep/test churn out of your context. Use it for an independently-verifiable unit of work you've already scoped — e.g. 'implement function X per this signature and make its tests pass', 'apply this exact refactor across package Y'. Pass a precise spec PLUS the context it needs (target files, signatures, conventions, how to verify), and raise `tier` to powerful for a genuinely hard change. Run implement calls one at a time, NOT in parallel — the clones share one working tree, so concurrent edits can collide. You still own review: the clone reports what it did, but check its diff. Do it yourself instead when the change is central to your reasoning, spans decisions you haven't made yet, or is small enough that delegating costs more than it saves.",
+			Tiers:       tiers,
+			DefaultTier: tierMedium,
+			System:      withMemory(implementSystemPrompt),
+			Tools:       implementTools,
+			Context:     subagentContext,
+			MaxIter:     40,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		subagentBindings = append(subagentBindings, implementBinding)
+	}
+
 	// --- main agent assembly ----------------------------------------------
 
 	// The main agent's read tools carry SHA-based dedup so re-reading an
@@ -396,7 +501,7 @@ func main() {
 		webTools,
 		luft.Tools(subagentBindings...),
 	).CacheLast(luft.Ephemeral()). // cache the entire tool block — stable per session
-		WithProviderTools(searchTools...)
+					WithProviderTools(searchTools...)
 
 	agent := luft.Agent{
 		Client: mainClient,
@@ -432,8 +537,18 @@ func main() {
 	row("bash", *bashMode)
 	row("subagents", subStatus)
 	if !*noSubagents {
-		row("explore", *exploreModel)
-		row("plan", *planModel)
+		// The three shared tiers, then each subagent's default tier (the
+		// calling model may request a different tier per call).
+		row("powerful", *powerfulModel)
+		row("medium", *mediumModel)
+		row("ultrafast", *ultrafastModel)
+		row("explore", grey("tier ")+tierUltrafast)
+		row("plan", grey("tier ")+tierPowerful)
+		if *noImplement {
+			row("implement", dim("off"))
+		} else {
+			row("implement", grey("tier ")+tierMedium)
+		}
 	}
 	searchStatus := green("on")
 	if *noSearch {
@@ -445,6 +560,11 @@ func main() {
 		compressStatus = fmt.Sprintf("%s %s", green("on"), grey(fmt.Sprintf("(>%d B)", *resultBudget)))
 	}
 	row("compress", compressStatus)
+	approveStatus := grey("prompt") + grey(" (y/a/A per call)")
+	if *autoYes {
+		approveStatus = yellow("auto") + grey(" (-yes: every call approved)")
+	}
+	row("approve", approveStatus)
 	row("dir", abs)
 	if resolvedLog != "" {
 		row("log", resolvedLog)
@@ -458,6 +578,7 @@ func main() {
 		provider:   provider,
 		memory:     memory,
 		logPath:    resolvedLog,
+		sp:         sp,
 	}
 	s.repl(ctx)
 }
@@ -499,12 +620,17 @@ func mustClient(provider luft.Provider, model string) *luft.Client {
 	return c
 }
 
-func makeConfirmer(autoYes bool) func(ctx context.Context, b luft.ToolBinding, input json.RawMessage) (bool, error) {
-	reader := bufio.NewReader(os.Stdin)
+// makeConfirmer builds the interactive tool-approval callback. in/out are the
+// streams it prompts on (os.Stdin/os.Stderr in production; injectable in
+// tests). sp is suspended for the duration of each prompt so its repaint loop
+// can't erase the prompt off the terminal.
+func makeConfirmer(autoYes bool, sp *spinner, in io.Reader, out io.Writer) func(ctx context.Context, b luft.ToolBinding, input json.RawMessage) (bool, error) {
+	reader := bufio.NewReader(in)
 	var mu sync.Mutex
 	approvedAll := map[string]bool{} // tool names whitelisted for the session via "a"
+	yesAll := autoYes                // session-wide auto-approve, settable at the prompt via "A"
 	return func(ctx context.Context, b luft.ToolBinding, input json.RawMessage) (bool, error) {
-		if !b.Meta.RequiresConfirmation || autoYes {
+		if !b.Meta.RequiresConfirmation {
 			return true, nil
 		}
 		// Tool calls can run concurrently; hold the lock across the whole
@@ -512,25 +638,41 @@ func makeConfirmer(autoYes bool) func(ctx context.Context, b luft.ToolBinding, i
 		// approval set is accessed safely.
 		mu.Lock()
 		defer mu.Unlock()
-		if approvedAll[b.Tool.Name] {
+		if yesAll || approvedAll[b.Tool.Name] {
 			return true, nil
 		}
-		fmt.Fprintf(os.Stderr, "\n[approve %s]\n", b.Tool.Name)
+		// Suspend the spinner for the duration of the prompt: its repaint
+		// loop writes to the same stream and would otherwise erase the
+		// prompt line every tick, leaving the CLI looking hung while it
+		// blocks on stdin.
+		sp.Suspend()
+		defer sp.Resume()
+
+		fmt.Fprintf(out, "\n%s %s\n", yellow("⏵ approve"), bold(b.Tool.Name))
 		if preview, ok := renderEditPreview(b.Tool.Name, input); ok {
-			fmt.Fprint(os.Stderr, preview)
+			fmt.Fprint(out, preview)
 		} else if compact := compactJSON(input); compact != "" {
-			fmt.Fprintf(os.Stderr, "  input: %s\n", compact)
+			fmt.Fprintf(out, "  %s %s\n", grey("input:"), compact)
 		}
-		fmt.Fprintf(os.Stderr, "  approve? [y/a/N]  %s ", dim("(a = approve all "+b.Tool.Name+" this session)"))
+		fmt.Fprintf(out, "  approve? %s  %s ",
+			bold("[y/a/A/N]"),
+			dim("y=yes · a=all "+b.Tool.Name+" · A=all tools · N=no"))
 		line, err := reader.ReadString('\n')
-		if err != nil {
+		if err != nil && line == "" {
+			// EOF (e.g. piped/closed stdin) or read error with nothing typed:
+			// treat as a decline rather than silently approving. Print a newline
+			// so the next output doesn't run onto the prompt line.
+			fmt.Fprintln(out)
 			return false, nil
 		}
-		switch strings.TrimSpace(strings.ToLower(line)) {
+		switch strings.TrimSpace(line) {
+		case "A", "All", "ALL":
+			yesAll = true
+			return true, nil
 		case "a", "all":
 			approvedAll[b.Tool.Name] = true
 			return true, nil
-		case "y", "yes":
+		case "y", "Y", "yes", "Yes":
 			return true, nil
 		default:
 			return false, nil

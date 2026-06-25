@@ -22,7 +22,8 @@ type session struct {
 	agent      luft.Agent
 	summarizer *luft.Client // typically Haiku, used by :compact
 	provider   luft.Provider
-	memory     string // loaded project memory, for :memory
+	memory     string   // loaded project memory, for :memory
+	sp         *spinner // shared activity indicator; the confirmer suspends it while prompting
 
 	history []luft.Message
 	usage   luft.Usage // accumulated across the session
@@ -70,7 +71,9 @@ func (s *session) runTurn(ctx context.Context, input string) {
 	//   - "thinking…"     between turns / iterations (model latency)
 	//   - "running tools…" when deltas pause for >500ms within a turn
 	//                      (proxy signal that tool execution is in flight)
-	sp := newSpinner(os.Stderr)
+	// Shared with the confirmer, which suspends it while prompting so the
+	// repaint loop can't wipe the approval prompt off the screen.
+	sp := s.sp
 	defer sp.Stop()
 
 	var idleMu sync.Mutex
@@ -229,7 +232,7 @@ func (s *session) doCompact(ctx context.Context, instructions string) {
 		return
 	}
 	before := len(s.history)
-	sp := newSpinner(os.Stderr)
+	sp := s.sp
 	sp.Start("compacting…")
 	out, usage, err := compact(ctx, s.summarizer, s.history, 4, instructions)
 	sp.Stop()
@@ -334,14 +337,23 @@ func toolInputPreview(input json.RawMessage) string {
 	}
 	var m map[string]any
 	if err := json.Unmarshal(input, &m); err == nil {
+		// A subagent call with an explicit tier shows it, so an escalation is
+		// visible on the result line (e.g. "implement  tier=powerful · task=…").
+		var prefix string
+		if v, ok := m["tier"].(string); ok && v != "" {
+			prefix = "tier=" + v + " · "
+		}
 		// Priority order: prefer the field that's most informative
 		// per tool family. First non-empty string wins.
 		for _, k := range []string{"command", "path", "file_path", "url", "pattern", "query", "task", "description", "name", "old_str"} {
 			if v, ok := m[k]; ok {
 				if vs, ok := v.(string); ok && vs != "" {
-					return truncate(oneLine(fmt.Sprintf("%s=%s", k, vs)), 80)
+					return truncate(oneLine(prefix+fmt.Sprintf("%s=%s", k, vs)), 80)
 				}
 			}
+		}
+		if prefix != "" {
+			return truncate(oneLine(strings.TrimSuffix(prefix, " · ")), 80)
 		}
 		// Generic fallback: list the first few keys.
 		var keys []string
