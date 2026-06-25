@@ -211,7 +211,7 @@ func tierArgDescription(tiers []Tier, def string) string {
 			b.WriteString(t.Description)
 		}
 	}
-	b.WriteString(". Escalate to a stronger class for genuinely hard tasks; stay on the default otherwise.")
+	b.WriteString(". Escalate to a stronger class for a genuinely hard task; drop to a faster, cheaper one for clearly trivial work; otherwise omit it and take the default.")
 	return b.String()
 }
 

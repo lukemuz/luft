@@ -125,13 +125,13 @@ Available tools:
 - implement (when available): a clone of yourself with the full editing toolset on the medium tier, running in its own clean context — delegate a well-scoped, independently-verifiable change you've already designed and get back a summary of what it did (its edit/test churn stays out of your context). You still review its diff.
 - now: current time
 
-Each subagent (explore, plan, implement) runs on one of three model tiers — powerful (strong reasoning, slower/pricier), medium (fast, high-quality), ultrafast (cheapest/fastest) — and defaults to the tier noted above. Pass an optional "tier" argument to override per call: escalate to powerful for a genuinely hard task, or drop to ultrafast for something trivial. When unsure, omit it and take the default.
+Each subagent (explore, plan, implement) runs on one of three model tiers — powerful (strongest reasoning and benchmarks, but slowest/priciest — reserve for hard tasks), medium (nearly as capable, faster and cheaper), ultrafast (fastest and cheapest, small model) — and defaults to the tier noted above. Pass an optional "tier" argument to override per call: escalate to powerful for a genuinely hard task, or drop to ultrafast for something trivial. When unsure, omit it and take the default.
 
 Two automatic context savers may alter tool results: re-issuing an identical read returns a brief "unchanged" notice instead of the full content (trust your earlier read, or pass a line range to force a fresh one), and very large command output is condensed to its errors and final status. Both preserve correctness-relevant detail.
 
 # Working effectively
 
-1. Default to the explore subagent for breadth — code you need to understand but won't necessarily edit: repo inspection (understand a module, find all usages, audit a pattern) and well-scoped Q&A (look up a stdlib function, summarise an RFC, answer a factual question with provided context). It's cheap, its file dumps and fetches stay out of your context, and you receive only its summary.
+1. Default to the explore subagent for breadth — code you need to understand but won't necessarily edit: repo inspection (understand a module, find all usages, audit a pattern) and well-scoped Q&A (look up a stdlib function, summarise an RFC, answer a factual question with provided context). It's cheap, its file dumps and fetches stay out of your context, and you receive only its summary. Choose explore over batch when the search is broad or open-ended and you only need the conclusion; choose batch when you need the raw file contents in your own context to act on.
 2. Read it yourself for (a) tight, surgical lookups (one file, one symbol) and (b) ANY code you are about to edit. explore's summary comes from a cheaper model: it loses detail you need to write a correct change, and you can't cheaply verify what you never saw. Delegating breadth is a good trade; delegating the reading of code you're about to modify is not.
 3. Default to batch for independent read-only work. Each tool call is a full LLM round trip, so if you'd otherwise issue 2+ reads/greps/inspections that don't depend on each other, batch them. Issue solo calls only when a later call's input depends on an earlier call's output (e.g. grep first, then read only the files it returned).
 4. Call plan as a routine first step for substantive design work — non-trivial multi-file changes, interface or data-shape changes, decisions with multiple plausible tradeoffs, or stuck debugging (2+ turns without a clear hypothesis). Pass the question with the context you've gathered. Skip plan for routine single-file changes or when your approach is already clear.
@@ -298,9 +298,9 @@ func main() {
 	// A subagent picks a tier per call via its "tier" argument, defaulting to
 	// its role tier. Descriptions are advertised to the calling model.
 	tiers := []subagent.Tier{
-		{Name: tierPowerful, Description: "strong reasoning; slower and pricier — for genuinely hard analysis, design, or debugging", Client: mainClient.WithModel(*powerfulModel)},
-		{Name: tierMedium, Description: "fast and high-quality — the solid default for real work", Client: mainClient.WithModel(*mediumModel)},
-		{Name: tierUltrafast, Description: "small model at very high throughput; cheapest and fastest — for quick reads, lookups, and summaries", Client: mainClient.WithModel(*ultrafastModel)},
+		{Name: tierPowerful, Description: "strongest reasoning and best benchmarks, but slowest and priciest — reserve for genuinely hard analysis, design, or debugging", Client: mainClient.WithModel(*powerfulModel)},
+		{Name: tierMedium, Description: "nearly as capable but faster and cheaper — a strong general-purpose class for real work", Client: mainClient.WithModel(*mediumModel)},
+		{Name: tierUltrafast, Description: "a small model at very high throughput — fastest and cheapest, for quick reads, lookups, and summaries", Client: mainClient.WithModel(*ultrafastModel)},
 	}
 
 	// --- shared building blocks --------------------------------------------
@@ -471,7 +471,7 @@ func main() {
 			WithProviderTools(searchTools...)
 		implementBinding, err := subagent.New(subagent.Config{
 			Name:        "implement",
-			Description: "Delegate a well-scoped, self-contained code change to a clone of yourself running in its own clean context (defaults to the medium tier — fast and high-quality). It has the full editing toolset (read, str_replace/multi_edit, bash, batch, todo, web) but no subagents, and returns a concise summary of what it changed while keeping its edit/grep/test churn out of your context. Use it for an independently-verifiable unit of work you've already scoped — e.g. 'implement function X per this signature and make its tests pass', 'apply this exact refactor across package Y'. Pass a precise spec PLUS the context it needs (target files, signatures, conventions, how to verify), and raise `tier` to powerful for a genuinely hard change. You still own review: the clone reports what it did, but check its diff. Do it yourself instead when the change is central to your reasoning, spans decisions you haven't made yet, or is small enough that delegating costs more than it saves.",
+			Description: "Delegate a well-scoped, self-contained code change to a clone of yourself running in its own clean context (defaults to the medium tier — fast and high-quality). It has the full editing toolset (read, str_replace/multi_edit, bash, batch, todo, web) but no subagents, and returns a concise summary of what it changed while keeping its edit/grep/test churn out of your context. Use it for an independently-verifiable unit of work you've already scoped — e.g. 'implement function X per this signature and make its tests pass', 'apply this exact refactor across package Y'. Pass a precise spec PLUS the context it needs (target files, signatures, conventions, how to verify), and raise `tier` to powerful for a genuinely hard change. Run implement calls one at a time, NOT in parallel — the clones share one working tree, so concurrent edits can collide. You still own review: the clone reports what it did, but check its diff. Do it yourself instead when the change is central to your reasoning, spans decisions you haven't made yet, or is small enough that delegating costs more than it saves.",
 			Tiers:       tiers,
 			DefaultTier: tierMedium,
 			System:      withMemory(implementSystemPrompt),
