@@ -14,9 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one well-scoped change to completion in its own isolated context and returns a
   summary, keeping its edit/test churn out of the orchestrator's context. It is
   deliberately non-recursive (no subagents of its own) and its edits/commands flow
-  through the same approval prompt as the main agent. Defaults to the main model;
-  override with `-implement-model` (env `LUFT_IMPLEMENT_MODEL`) or disable with
-  `-no-implement`. `-no-subagents` now disables explore, plan, and implement.
+  through the same approval prompt as the main agent. Disable with `-no-implement`;
+  `-no-subagents` disables explore, plan, and implement.
+- CLI: subagent **model tiers**. Subagents share three classes — `powerful`,
+  `medium`, `ultrafast` — set via `-model-powerful` / `-model-medium` /
+  `-model-ultrafast` (env `LUFT_MODEL_*`). Each subagent has a default tier
+  (explore→ultrafast, plan→powerful, implement→medium) and the calling model can
+  request a different tier per call via a new optional `tier` argument on each
+  subagent tool — escalating a hard task or dropping a trivial one. The chosen
+  tier shows on the tool-result line. Defaults: powerful = `z-ai/glm-5.2`,
+  medium = `x-ai/grok-4.3`, ultrafast = `openai/gpt-oss-120b:nitro` (the `:nitro`
+  suffix is OpenRouter's native throughput routing, which lands on Cerebras for
+  this model). `subagent.Config` gained `Tiers []subagent.Tier` + `DefaultTier`.
 
 ### Changed
 
@@ -25,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trimming and summarization the main agent has — a long subagent run is
   summarized in place rather than risking its context window. `subagent.Config`
   gained an optional `Context luft.ContextManager` field for this.
+- CLI: the per-subagent model flags `-explore-model` / `-plan-model` /
+  `-implement-model` are replaced by the three shared tier flags above.
 
 ### Fixed
 

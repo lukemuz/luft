@@ -5,22 +5,24 @@
 //	main agent           (z-ai/glm-5.2 by default — configurable via -model)
 //	  ├── direct tools   workspace read-only + trained bash + trained editor
 //	  │                  + todo + clock + batch
-//	  ├── explore        subagent on google/gemini-3.5-flash (-explore-model) —
+//	  ├── explore        research subagent (default tier: ultrafast) —
 //	  │                  workspace read-only + restricted bash + batch + clock.
 //	  │                  Used for cheap, parallelisable inspection; its
 //	  │                  iteration history never enters the main context.
-//	  ├── plan           subagent on z-ai/glm-5.2 (-plan-model) — read-only
+//	  ├── plan           design subagent (default tier: powerful) — read-only
 //	  │                  tools, no shell or edits. Used when the main agent
 //	  │                  wants a focused reasoner for design or hard debugging.
-//	  └── implement      subagent on the main model (-implement-model) — a clone
-//	                     with the full editing toolset (read + edit + bash +
-//	                     batch + todo + web) but NO subagents of its own.
-//	                     Carries one well-scoped change to completion in an
-//	                     isolated context and returns a summary; the main agent
-//	                     reviews the resulting diff. Disable with -no-implement.
+//	  └── implement      editing clone (default tier: medium) — the full editing
+//	                     toolset (read + edit + bash + batch + todo + web) but NO
+//	                     subagents of its own. Carries one well-scoped change to
+//	                     completion in an isolated context and returns a summary;
+//	                     the main agent reviews the diff. Disable with -no-implement.
 //
-// All three subagents run through the Agent block, so each gets the same
-// in-loop context trimming/summarization the main agent has.
+// Subagents share three model tiers — powerful / medium / ultrafast (set via
+// -model-powerful / -model-medium / -model-ultrafast). Each subagent has a
+// default tier (above), and the calling model may request a different tier per
+// call via a "tier" argument. All subagents run through the Agent block, so each
+// gets the same in-loop context trimming/summarization the main agent has.
 //
 // The batch tool is also offered to the main agent so it can run several
 // reads/searches concurrently in a single turn without paying for a
@@ -34,20 +36,19 @@
 // The agent is sandboxed to the current working directory by default.
 // Pass -dir to operate on a different directory.
 //
-// Models default to z-ai/glm-5.2 for the main agent and plan subagent,
-// and google/gemini-3.5-flash for the explore subagent. Override with
-// -model / -explore-model / -plan-model to use any OpenRouter-supported
-// model id.
+// The main agent defaults to z-ai/glm-5.2 (-model). Subagent tiers default to
+// z-ai/glm-5.2 (powerful), x-ai/grok-4.3 (medium), and openai/gpt-oss-120b:nitro
+// (ultrafast) — any OpenRouter slug works.
 //
 // Flags:
 //
-//	-dir            working directory the agent is sandboxed to (default cwd)
-//	-model          main-agent model id (default z-ai/glm-5.2)
-//	-explore-model  model used for the explore subagent (default google/gemini-3.5-flash)
-//	-plan-model     model used for the plan subagent (default z-ai/glm-5.2)
-//	-implement-model model used for the implement subagent (default: -model)
-//	-no-subagents   disable all subagent tools (explore, plan, implement)
-//	-no-implement   disable only the implement subagent
+//	-dir             working directory the agent is sandboxed to (default cwd)
+//	-model           main-agent model id (default z-ai/glm-5.2)
+//	-model-powerful  powerful subagent tier (default x-ai/grok-4.3)
+//	-model-medium    medium subagent tier (default z-ai/glm-5.2)
+//	-model-ultrafast ultrafast subagent tier (default openai/gpt-oss-120b:nitro)
+//	-no-subagents    disable all subagent tools (explore, plan, implement)
+//	-no-implement    disable only the implement subagent
 //	-no-fetch       disable the native web_fetch tool
 //	-no-search      disable the OpenRouter web_search provider tool
 //	-bash           bash safety mode: restricted | standard | unrestricted
@@ -100,6 +101,14 @@ import (
 // `go build -ldflags "-X main.version=vX.Y.Z"`.
 var version = "v0.2.0"
 
+// Subagent model-tier names. Subagents share these three classes; the calling
+// model may request one per call, otherwise each subagent uses its role tier.
+const (
+	tierPowerful  = "powerful"
+	tierMedium    = "medium"
+	tierUltrafast = "ultrafast"
+)
+
 const mainSystemPrompt = `You are luft, a fast and economical CLI coding assistant built on the luft toolkit. You operate inside a workspace directory and help the user with software engineering tasks — reading code, making edits, running commands, and reasoning about changes.
 
 Available tools:
@@ -111,10 +120,12 @@ Available tools:
 - batch: run 2+ independent read-only calls in one turn. Default for independent reads/greps/inspections; skip only when a later call depends on an earlier result.
 - web_fetch (when available): download an http(s) URL and return its content as text. HTML is converted to a plain-text approximation; long pages paginate via max_length + start_index. Use this for documentation lookups and inspecting URLs from error messages.
 - web_search (when available): run a web search and get results with citations. Use when you do NOT already have a URL — current library docs, an unfamiliar API, or an error message you want to look up. Pair with web_fetch to read a promising result in full.
-- explore (when available): bounded research specialist on a fast, cheap model — repo inspection or well-scoped Q&A (provided context, fetched docs, web search, or its own knowledge); returns a concise summary with file dumps and fetches kept out of your context
-- plan (when available): design specialist running in a fresh, focused context — get a structured plan before non-trivial multi-file edits, interface changes, or when stuck on a hypothesis
-- implement (when available): a clone of yourself with the full editing toolset, running in its own clean context — delegate a well-scoped, independently-verifiable change you've already designed and get back a summary of what it did (its edit/test churn stays out of your context). You still review its diff.
+- explore (when available): bounded research specialist that defaults to the ultrafast tier (a small model at very high throughput — extremely fast and cheap) — repo inspection or well-scoped Q&A (provided context, fetched docs, web search, or its own knowledge); returns a concise summary with file dumps and fetches kept out of your context. Lean on it freely and fan several out in parallel.
+- plan (when available): design specialist on the powerful tier, running in a fresh, focused context — get a structured plan before non-trivial multi-file edits, interface changes, or when stuck on a hypothesis
+- implement (when available): a clone of yourself with the full editing toolset on the medium tier, running in its own clean context — delegate a well-scoped, independently-verifiable change you've already designed and get back a summary of what it did (its edit/test churn stays out of your context). You still review its diff.
 - now: current time
+
+Each subagent (explore, plan, implement) runs on one of three model tiers — powerful (strong reasoning, slower/pricier), medium (fast, high-quality), ultrafast (cheapest/fastest) — and defaults to the tier noted above. Pass an optional "tier" argument to override per call: escalate to powerful for a genuinely hard task, or drop to ultrafast for something trivial. When unsure, omit it and take the default.
 
 Two automatic context savers may alter tool results: re-issuing an identical read returns a brief "unchanged" notice instead of the full content (trust your earlier read, or pass a line range to force a fresh one), and very large command output is condensed to its errors and final status. Both preserve correctness-relevant detail.
 
@@ -203,9 +214,13 @@ Your final message is the ONLY thing the orchestrator sees — your iteration hi
 func main() {
 	dir := flag.String("dir", ".", "working directory the agent is sandboxed to (defaults to the current directory)")
 	model := flag.String("model", envOr("LUFT_MODEL", "z-ai/glm-5.2"), "main-agent model id (any OpenRouter slug; env: LUFT_MODEL)")
-	exploreModel := flag.String("explore-model", envOr("LUFT_EXPLORE_MODEL", "google/gemini-3.5-flash"), "model id for the explore subagent (env: LUFT_EXPLORE_MODEL)")
-	planModel := flag.String("plan-model", envOr("LUFT_PLAN_MODEL", "z-ai/glm-5.2"), "model id for the plan subagent (env: LUFT_PLAN_MODEL)")
-	implementModel := flag.String("implement-model", envOr("LUFT_IMPLEMENT_MODEL", ""), "model id for the implement subagent (env: LUFT_IMPLEMENT_MODEL; defaults to -model)")
+	// Subagents pick from three shared model tiers; the calling model may
+	// request a tier per call (see subagent tool schemas), otherwise each
+	// subagent uses its role default (explore→ultrafast, plan→powerful,
+	// implement→medium).
+	powerfulModel := flag.String("model-powerful", envOr("LUFT_MODEL_POWERFUL", "z-ai/glm-5.2"), "powerful tier: strong reasoning model for subagents (env: LUFT_MODEL_POWERFUL)")
+	mediumModel := flag.String("model-medium", envOr("LUFT_MODEL_MEDIUM", "x-ai/grok-4.3"), "medium tier: fast, high-quality model for subagents (env: LUFT_MODEL_MEDIUM)")
+	ultrafastModel := flag.String("model-ultrafast", envOr("LUFT_MODEL_ULTRAFAST", "openai/gpt-oss-120b:nitro"), "ultrafast tier: small model at very high throughput for subagents (env: LUFT_MODEL_ULTRAFAST)")
 	noSubagents := flag.Bool("no-subagents", false, "disable all subagent tools (explore, plan, implement)")
 	noImplement := flag.Bool("no-implement", false, "disable only the implement subagent (the editing clone)")
 	noFetch := flag.Bool("no-fetch", false, "disable the native web_fetch tool")
@@ -222,12 +237,6 @@ func main() {
 	if *showVersion {
 		fmt.Println(version)
 		return
-	}
-
-	// The implement subagent is a clone of the main agent, so it defaults to
-	// the main model unless explicitly pointed elsewhere.
-	if *implementModel == "" {
-		*implementModel = *model
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -283,6 +292,16 @@ func main() {
 	// via LUFT_SUMMARIZE_MODEL to point it at a cheaper slug. Derived from
 	// mainClient after the recorder is attached so its calls log too.
 	summarizer := mainClient.WithModel(envOr("LUFT_SUMMARIZE_MODEL", "z-ai/glm-5.2"))
+
+	// The three shared subagent model tiers. Derived from mainClient (after the
+	// recorder is attached) so every tier's calls log to the same session file.
+	// A subagent picks a tier per call via its "tier" argument, defaulting to
+	// its role tier. Descriptions are advertised to the calling model.
+	tiers := []subagent.Tier{
+		{Name: tierPowerful, Description: "strong reasoning; slower and pricier — for genuinely hard analysis, design, or debugging", Client: mainClient.WithModel(*powerfulModel)},
+		{Name: tierMedium, Description: "fast and high-quality — the solid default for real work", Client: mainClient.WithModel(*mediumModel)},
+		{Name: tierUltrafast, Description: "small model at very high throughput; cheapest and fastest — for quick reads, lookups, and summaries", Client: mainClient.WithModel(*ultrafastModel)},
+	}
 
 	// --- shared building blocks --------------------------------------------
 
@@ -364,14 +383,14 @@ func main() {
 
 	var subagentBindings []luft.ToolBinding
 	if !*noSubagents {
-		exploreClient := mainClient.WithModel(*exploreModel)
 		exploreTools := luft.MustJoin(roTools, subBashToolset, webTools, luft.Tools(roBatchBinding)).
 			CacheLast(luft.Ephemeral()).
 			WithProviderTools(searchTools...)
 		exploreBinding, err := subagent.New(subagent.Config{
 			Name:        "explore",
-			Description: "Delegate a bounded research task to a fast, cheap specialist. Two main shapes: (a) repo research — find callers, audit a pattern, summarise a module, locate references; (b) bounded Q&A — answer a well-scoped question from provided context, fetched docs, web search, or general knowledge (e.g. 'what does this stdlib function do', 'summarise this RFC's caching rules'). The specialist has read-only filesystem tools, restricted bash, web_fetch, web_search, and batch fan-out; it returns a concise summary and its iteration history stays out of your context. Pass a self-contained task description with any context the specialist needs. Use for breadth — surveys, usage audits, well-scoped research. For the specific code you are about to edit, read it yourself: the summary loses detail you need to write a correct change, and you can't cheaply verify what you didn't see.",
-			Client:      exploreClient,
+			Description: "Delegate a bounded research task to an EXTREMELY fast, cheap specialist (defaults to the ultrafast tier — a small model served at very high throughput, so it returns in a fraction of the time and cost of a main-model turn). Lean on it freely and prefer firing several in parallel over reading widely yourself. Two main shapes: (a) repo research — find callers, audit a pattern, summarise a module, locate references; (b) bounded Q&A — answer a well-scoped question from provided context, fetched docs, web search, or general knowledge (e.g. 'what does this stdlib function do', 'summarise this RFC's caching rules'). The specialist has read-only filesystem tools, restricted bash, web_fetch, web_search, and batch fan-out; it returns a concise summary and its iteration history stays out of your context. Pass a self-contained task description with any context it needs; raise `tier` for research that needs real reasoning. For the specific code you are about to edit, read it yourself: a small-model summary loses detail you need to write a correct change, and you can't cheaply verify what you didn't see.",
+			Tiers:       tiers,
+			DefaultTier: tierUltrafast,
 			System:      withMemory(exploreSystemPrompt),
 			Tools:       exploreTools,
 			Context:     subagentContext,
@@ -381,11 +400,11 @@ func main() {
 			log.Fatal(err)
 		}
 
-		planClient := mainClient.WithModel(*planModel)
 		planBinding, err := subagent.New(subagent.Config{
 			Name:        "plan",
-			Description: "Delegate design and architecture work to a focused planning specialist running in its own clean context (point -plan-model at a stronger reasoning model if desired). Get a structured plan before editing when work touches 3+ files, changes a public interface or shared data shape, has multiple plausible tradeoffs, or you've spent 2+ debugging turns without a clear hypothesis. Pass the question PLUS context you've gathered (file excerpts, error messages, prior attempts). Returns a numbered plan with files to touch and risks. Skip for routine single-file changes or when your approach is already clear.",
-			Client:      planClient,
+			Description: "Delegate design and architecture work to a focused planning specialist running in its own clean context (defaults to the powerful tier — a strong reasoning model). Get a structured plan before editing when work touches 3+ files, changes a public interface or shared data shape, has multiple plausible tradeoffs, or you've spent 2+ debugging turns without a clear hypothesis. Pass the question PLUS context you've gathered (file excerpts, error messages, prior attempts). Returns a numbered plan with files to touch and risks. Skip for routine single-file changes or when your approach is already clear; drop `tier` to a faster class for lightweight planning.",
+			Tiers:       tiers,
+			DefaultTier: tierPowerful,
 			System:      withMemory(planSystemPrompt),
 			Tools:       roTools.CacheLast(luft.Ephemeral()),
 			Context:     subagentContext,
@@ -442,7 +461,6 @@ func main() {
 	// given the subagent bindings — subagents must not recurse. Built here,
 	// after editTools, and appended to the subagent set the main agent sees.
 	if !*noSubagents && !*noImplement {
-		implementClient := mainClient.WithModel(*implementModel)
 		implementTools := luft.MustJoin(
 			roTools,
 			luft.Tools(roBatchBinding),
@@ -453,8 +471,9 @@ func main() {
 			WithProviderTools(searchTools...)
 		implementBinding, err := subagent.New(subagent.Config{
 			Name:        "implement",
-			Description: "Delegate a well-scoped, self-contained code change to a clone of yourself running in its own clean context. It has the full editing toolset (read, str_replace/multi_edit, bash, batch, todo, web) but no subagents, and returns a concise summary of what it changed while keeping its edit/grep/test churn out of your context. Use it for an independently-verifiable unit of work you've already scoped — e.g. 'implement function X per this signature and make its tests pass', 'apply this exact refactor across package Y'. Pass a precise spec PLUS the context it needs (target files, signatures, conventions, how to verify). You still own review: the clone reports what it did, but check its diff. Do it yourself instead when the change is central to your reasoning, spans decisions you haven't made yet, or is small enough that delegating costs more than it saves.",
-			Client:      implementClient,
+			Description: "Delegate a well-scoped, self-contained code change to a clone of yourself running in its own clean context (defaults to the medium tier — fast and high-quality). It has the full editing toolset (read, str_replace/multi_edit, bash, batch, todo, web) but no subagents, and returns a concise summary of what it changed while keeping its edit/grep/test churn out of your context. Use it for an independently-verifiable unit of work you've already scoped — e.g. 'implement function X per this signature and make its tests pass', 'apply this exact refactor across package Y'. Pass a precise spec PLUS the context it needs (target files, signatures, conventions, how to verify), and raise `tier` to powerful for a genuinely hard change. You still own review: the clone reports what it did, but check its diff. Do it yourself instead when the change is central to your reasoning, spans decisions you haven't made yet, or is small enough that delegating costs more than it saves.",
+			Tiers:       tiers,
+			DefaultTier: tierMedium,
 			System:      withMemory(implementSystemPrompt),
 			Tools:       implementTools,
 			Context:     subagentContext,
@@ -518,12 +537,17 @@ func main() {
 	row("bash", *bashMode)
 	row("subagents", subStatus)
 	if !*noSubagents {
-		row("explore", *exploreModel)
-		row("plan", *planModel)
+		// The three shared tiers, then each subagent's default tier (the
+		// calling model may request a different tier per call).
+		row("powerful", *powerfulModel)
+		row("medium", *mediumModel)
+		row("ultrafast", *ultrafastModel)
+		row("explore", grey("tier ")+tierUltrafast)
+		row("plan", grey("tier ")+tierPowerful)
 		if *noImplement {
 			row("implement", dim("off"))
 		} else {
-			row("implement", *implementModel)
+			row("implement", grey("tier ")+tierMedium)
 		}
 	}
 	searchStatus := green("on")
