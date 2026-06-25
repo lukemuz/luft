@@ -15,10 +15,12 @@
 //     the same subagent with different tasks) in one turn; if wrapped
 //     by the batch tool they execute concurrently.
 //
-// The subagent runs Loop with its own MaxIter cap; on success the final
-// assistant text is returned to the parent as the tool result. On
-// failure, any partial text is included in the error so the parent has
-// something to react to.
+// The subagent runs through the Agent block with its own MaxIter cap and an
+// optional ContextManager (Config.Context), so a long run is trimmed and
+// summarized in place just like the top-level agent. On success the final
+// assistant text is returned to the parent as the tool result. On failure,
+// any partial text is included in the error so the parent has something to
+// react to.
 package subagent
 
 import (
@@ -49,6 +51,14 @@ type Config struct {
 	// (e.g. for pure-text writer subagents).
 	Tools luft.Toolset
 
+	// Context, when its MaxTokens > 0, enables history trimming /
+	// summarization for the subagent's internal loop — the same mechanism
+	// the top-level Agent uses. Leave it zero for short research subagents
+	// whose loops never approach the context window; set it for subagents
+	// that do real, long-running work (e.g. an implementer) so a lengthy
+	// run is summarized in place rather than blowing the window.
+	Context luft.ContextManager
+
 	// MaxIter caps the subagent's loop. 0 means no limit. Recommend
 	// 4-12 for inspection subagents, 2-4 for writers.
 	MaxIter int
@@ -78,13 +88,18 @@ func New(cfg Config) (luft.ToolBinding, error) {
 			if in.Task == "" {
 				return "", fmt.Errorf("subagent %q: task is empty", cfg.Name)
 			}
-			result, err := cfg.Client.Loop(
-				ctx,
-				cfg.System,
-				[]luft.Message{luft.NewUserMessage(in.Task)},
-				cfg.Tools,
-				cfg.MaxIter,
-			)
+			// The subagent runs through the Agent block rather than Loop
+			// directly so it gets the same context-trimming behaviour as the
+			// top-level agent. With a zero-value Context (MaxTokens == 0) the
+			// trim step is a no-op, so research subagents pay nothing for it.
+			agent := luft.Agent{
+				Client:  cfg.Client,
+				System:  cfg.System,
+				Tools:   cfg.Tools,
+				Context: cfg.Context,
+				MaxIter: cfg.MaxIter,
+			}
+			result, err := agent.Step(ctx, []luft.Message{luft.NewUserMessage(in.Task)})
 			if err != nil {
 				if t := lastText(result); t != "" {
 					return "", fmt.Errorf("subagent %q failed mid-task: %w (partial: %s)", cfg.Name, err, truncate(t, 1000))

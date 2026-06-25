@@ -9,9 +9,18 @@
 //	  │                  workspace read-only + restricted bash + batch + clock.
 //	  │                  Used for cheap, parallelisable inspection; its
 //	  │                  iteration history never enters the main context.
-//	  └── plan           subagent on z-ai/glm-5.2 (-plan-model) — read-only
-//	                     tools, no shell or edits. Used when the main agent
-//	                     wants a focused reasoner for design or hard debugging.
+//	  ├── plan           subagent on z-ai/glm-5.2 (-plan-model) — read-only
+//	  │                  tools, no shell or edits. Used when the main agent
+//	  │                  wants a focused reasoner for design or hard debugging.
+//	  └── implement      subagent on the main model (-implement-model) — a clone
+//	                     with the full editing toolset (read + edit + bash +
+//	                     batch + todo + web) but NO subagents of its own.
+//	                     Carries one well-scoped change to completion in an
+//	                     isolated context and returns a summary; the main agent
+//	                     reviews the resulting diff. Disable with -no-implement.
+//
+// All three subagents run through the Agent block, so each gets the same
+// in-loop context trimming/summarization the main agent has.
 //
 // The batch tool is also offered to the main agent so it can run several
 // reads/searches concurrently in a single turn without paying for a
@@ -36,7 +45,9 @@
 //	-model          main-agent model id (default z-ai/glm-5.2)
 //	-explore-model  model used for the explore subagent (default google/gemini-3.5-flash)
 //	-plan-model     model used for the plan subagent (default z-ai/glm-5.2)
-//	-no-subagents   disable the explore and plan subagent tools
+//	-implement-model model used for the implement subagent (default: -model)
+//	-no-subagents   disable all subagent tools (explore, plan, implement)
+//	-no-implement   disable only the implement subagent
 //	-no-fetch       disable the native web_fetch tool
 //	-no-search      disable the OpenRouter web_search provider tool
 //	-bash           bash safety mode: restricted | standard | unrestricted
@@ -102,6 +113,7 @@ Available tools:
 - web_search (when available): run a web search and get results with citations. Use when you do NOT already have a URL — current library docs, an unfamiliar API, or an error message you want to look up. Pair with web_fetch to read a promising result in full.
 - explore (when available): bounded research specialist on a fast, cheap model — repo inspection or well-scoped Q&A (provided context, fetched docs, web search, or its own knowledge); returns a concise summary with file dumps and fetches kept out of your context
 - plan (when available): design specialist running in a fresh, focused context — get a structured plan before non-trivial multi-file edits, interface changes, or when stuck on a hypothesis
+- implement (when available): a clone of yourself with the full editing toolset, running in its own clean context — delegate a well-scoped, independently-verifiable change you've already designed and get back a summary of what it did (its edit/test churn stays out of your context). You still review its diff.
 - now: current time
 
 Two automatic context savers may alter tool results: re-issuing an identical read returns a brief "unchanged" notice instead of the full content (trust your earlier read, or pass a line range to force a fresh one), and very large command output is condensed to its errors and final status. Both preserve correctness-relevant detail.
@@ -112,8 +124,8 @@ Two automatic context savers may alter tool results: re-issuing an identical rea
 2. Read it yourself for (a) tight, surgical lookups (one file, one symbol) and (b) ANY code you are about to edit. explore's summary comes from a cheaper model: it loses detail you need to write a correct change, and you can't cheaply verify what you never saw. Delegating breadth is a good trade; delegating the reading of code you're about to modify is not.
 3. Default to batch for independent read-only work. Each tool call is a full LLM round trip, so if you'd otherwise issue 2+ reads/greps/inspections that don't depend on each other, batch them. Issue solo calls only when a later call's input depends on an earlier call's output (e.g. grep first, then read only the files it returned).
 4. Call plan as a routine first step for substantive design work — non-trivial multi-file changes, interface or data-shape changes, decisions with multiple plausible tradeoffs, or stuck debugging (2+ turns without a clear hypothesis). Pass the question with the context you've gathered. Skip plan for routine single-file changes or when your approach is already clear.
-5. Brief subagents like a colleague who just walked in: state the goal, the relevant context you've already gathered (file paths, line numbers, error messages, what you've ruled out), and what shape of answer you need. Terse one-line prompts produce shallow, generic work.
-6. For multi-step tasks, call todo_write at the start and update it as you go. Keep at most one item in_progress.
+5. Delegate to implement when a change is well-scoped and independently verifiable and keeping its churn out of your context is worth it — a mechanical refactor repeated across files, or a self-contained unit you can hand off with a precise spec and a clear "done when tests pass". Do it yourself when the change is central to what you're reasoning about, depends on decisions you haven't made, or is small enough that writing the spec costs more than the edit. Either way you own the review — read implement's diff before trusting it.
+6. Brief subagents like a colleague who just walked in: state the goal, the relevant context you've already gathered (file paths, line numbers, error messages, what you've ruled out), and what shape of answer you need. Terse one-line prompts produce shallow, generic work. For multi-step tasks, call todo_write at the start and update it as you go, keeping at most one item in_progress.
 
 # Writing code
 
@@ -173,12 +185,29 @@ Operating principles:
 3. Return a structured plan: numbered steps, files to touch, risks. Keep it implementable, not aspirational.
 4. Be honest about what you don't know.`
 
+const implementSystemPrompt = `You are luft's implement specialist — a focused engineer who carries one well-scoped change to completion in your own clean context.
+
+You receive a self-contained task from an orchestrator that has already done the surrounding design and reading. You have the full editing toolset: read-only filesystem inspection, str_replace_based_edit_tool and multi_edit for changes, bash for builds/tests/git, batch for read-only fan-out, todo for tracking multi-step work, and web_fetch/web_search when available. You have NO subagents — do the work yourself.
+
+Operating principles:
+1. Read before you write. Open every file you are about to edit; match the conventions of the surrounding code (naming, error handling, imports, layout). Read a neighbour before introducing a new pattern.
+2. Stay inside the task. Make the change you were asked for and nothing more — no opportunistic refactors, no scaffolding for hypothetical futures, no backwards-compat shims for code you can just change. Three similar lines beat a premature abstraction.
+3. Write no comments unless the *why* is non-obvious (a hidden constraint, a subtle invariant, a workaround). Don't narrate *what* the code does.
+4. Watch for security issues (injection, path traversal, the OWASP top 10) and fix any you introduce immediately.
+5. Verify before you report: build, type-check, and run the affected tests via bash. Review your own diff with git diff. If you can't exercise the change in this environment, say so plainly rather than claiming success.
+6. If the same approach fails twice, stop and reconsider rather than trying a third variation — report what you tried, what failed, and your current hypothesis.
+7. Act with care. Local reversible actions (edits, reads, tests, builds) are free — just do them. But do NOT take destructive or shared-state actions unless the task explicitly calls for them: deleting files/branches, dropping data, force-pushing, rewriting history, committing, pushing, or downgrading dependencies. Never use a destructive shortcut to get past a failing check (no --no-verify, no skipping hooks). If the task seems to require one of these, do the reversible work and flag the remaining step in your summary rather than performing it.
+
+Your final message is the ONLY thing the orchestrator sees — your iteration history is discarded. Return a tight summary: the files you changed and how (path:line where useful), the key decisions you made, the exact verification you ran and its result, and anything you could NOT verify or that remains open. The orchestrator will review your actual diff, so be precise about what it will find.`
+
 func main() {
 	dir := flag.String("dir", ".", "working directory the agent is sandboxed to (defaults to the current directory)")
 	model := flag.String("model", envOr("LUFT_MODEL", "z-ai/glm-5.2"), "main-agent model id (any OpenRouter slug; env: LUFT_MODEL)")
 	exploreModel := flag.String("explore-model", envOr("LUFT_EXPLORE_MODEL", "google/gemini-3.5-flash"), "model id for the explore subagent (env: LUFT_EXPLORE_MODEL)")
 	planModel := flag.String("plan-model", envOr("LUFT_PLAN_MODEL", "z-ai/glm-5.2"), "model id for the plan subagent (env: LUFT_PLAN_MODEL)")
-	noSubagents := flag.Bool("no-subagents", false, "disable explore and plan subagent tools")
+	implementModel := flag.String("implement-model", envOr("LUFT_IMPLEMENT_MODEL", ""), "model id for the implement subagent (env: LUFT_IMPLEMENT_MODEL; defaults to -model)")
+	noSubagents := flag.Bool("no-subagents", false, "disable all subagent tools (explore, plan, implement)")
+	noImplement := flag.Bool("no-implement", false, "disable only the implement subagent (the editing clone)")
 	noFetch := flag.Bool("no-fetch", false, "disable the native web_fetch tool")
 	noSearch := flag.Bool("no-search", false, "disable the OpenRouter web_search provider tool")
 	bashMode := flag.String("bash", "restricted", "bash safety mode: restricted | standard | unrestricted")
@@ -193,6 +222,12 @@ func main() {
 	if *showVersion {
 		fmt.Println(version)
 		return
+	}
+
+	// The implement subagent is a clone of the main agent, so it defaults to
+	// the main model unless explicitly pointed elsewhere.
+	if *implementModel == "" {
+		*implementModel = *model
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -316,6 +351,17 @@ func main() {
 
 	// --- subagent tools ----------------------------------------------------
 
+	// Every subagent runs through the Agent block (see subagent.New), so they
+	// share the main agent's in-loop context management: a long subagent run is
+	// trimmed and summarized in place rather than blowing its context window.
+	// The summarizer client is the same one the main loop uses.
+	subagentContext := luft.ContextManager{
+		MaxTokens:  *contextBudget,
+		KeepFirst:  1,
+		KeepRecent: 30,
+		Summarizer: makeAutoSummarizer(summarizer),
+	}
+
 	var subagentBindings []luft.ToolBinding
 	if !*noSubagents {
 		exploreClient := mainClient.WithModel(*exploreModel)
@@ -328,6 +374,7 @@ func main() {
 			Client:      exploreClient,
 			System:      withMemory(exploreSystemPrompt),
 			Tools:       exploreTools,
+			Context:     subagentContext,
 			MaxIter:     50,
 		})
 		if err != nil {
@@ -341,6 +388,7 @@ func main() {
 			Client:      planClient,
 			System:      withMemory(planSystemPrompt),
 			Tools:       roTools.CacheLast(luft.Ephemeral()),
+			Context:     subagentContext,
 			MaxIter:     25,
 		})
 		if err != nil {
@@ -385,6 +433,38 @@ func main() {
 		luft.WithLogging(logger),
 	)
 	editTools := luft.MustJoin(bashTools, editorTools)
+
+	// --- implement subagent ------------------------------------------------
+
+	// A clone of the main agent that carries one well-scoped change to
+	// completion in an isolated context. It shares the editing toolset (so its
+	// edits and shell commands flow through the same confirmer) but is NOT
+	// given the subagent bindings — subagents must not recurse. Built here,
+	// after editTools, and appended to the subagent set the main agent sees.
+	if !*noSubagents && !*noImplement {
+		implementClient := mainClient.WithModel(*implementModel)
+		implementTools := luft.MustJoin(
+			roTools,
+			luft.Tools(roBatchBinding),
+			editTools,
+			todo.New().Toolset(),
+			webTools,
+		).CacheLast(luft.Ephemeral()).
+			WithProviderTools(searchTools...)
+		implementBinding, err := subagent.New(subagent.Config{
+			Name:        "implement",
+			Description: "Delegate a well-scoped, self-contained code change to a clone of yourself running in its own clean context. It has the full editing toolset (read, str_replace/multi_edit, bash, batch, todo, web) but no subagents, and returns a concise summary of what it changed while keeping its edit/grep/test churn out of your context. Use it for an independently-verifiable unit of work you've already scoped — e.g. 'implement function X per this signature and make its tests pass', 'apply this exact refactor across package Y'. Pass a precise spec PLUS the context it needs (target files, signatures, conventions, how to verify). You still own review: the clone reports what it did, but check its diff. Do it yourself instead when the change is central to your reasoning, spans decisions you haven't made yet, or is small enough that delegating costs more than it saves.",
+			Client:      implementClient,
+			System:      withMemory(implementSystemPrompt),
+			Tools:       implementTools,
+			Context:     subagentContext,
+			MaxIter:     40,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		subagentBindings = append(subagentBindings, implementBinding)
+	}
 
 	// --- main agent assembly ----------------------------------------------
 
@@ -440,6 +520,11 @@ func main() {
 	if !*noSubagents {
 		row("explore", *exploreModel)
 		row("plan", *planModel)
+		if *noImplement {
+			row("implement", dim("off"))
+		} else {
+			row("implement", *implementModel)
+		}
 	}
 	searchStatus := green("on")
 	if *noSearch {

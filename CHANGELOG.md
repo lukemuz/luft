@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- CLI: an `implement` subagent — a clone of the main agent with the full editing
+  toolset (read, `str_replace`/`multi_edit`, bash, batch, todo, web) that carries
+  one well-scoped change to completion in its own isolated context and returns a
+  summary, keeping its edit/test churn out of the orchestrator's context. It is
+  deliberately non-recursive (no subagents of its own) and its edits/commands flow
+  through the same approval prompt as the main agent. Defaults to the main model;
+  override with `-implement-model` (env `LUFT_IMPLEMENT_MODEL`) or disable with
+  `-no-implement`. `-no-subagents` now disables explore, plan, and implement.
+
+### Changed
+
+- All subagents (explore, plan, implement) now run through the `Agent` block
+  instead of calling `Loop` directly, so each gets the same in-loop context
+  trimming and summarization the main agent has — a long subagent run is
+  summarized in place rather than risking its context window. `subagent.Config`
+  gained an optional `Context luft.ContextManager` field for this.
+
 ### Fixed
 
 - CLI: tool-approval prompts no longer get erased by the activity spinner. The
