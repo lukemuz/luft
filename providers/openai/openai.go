@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/lukemuz/luft"
@@ -16,7 +17,18 @@ import (
 
 const (
 	openAIDefaultBaseURL = "https://api.openai.com"
-	defaultHTTPTimeout   = 60 * time.Second
+	// defaultHTTPTimeout bounds a non-streaming request end to end. It's
+	// generous because agentic, non-streaming Call paths (subagents, the
+	// summarizer, Extract) routinely take longer than a chat reply — a slow or
+	// reasoning model on a large context can run for minutes. Streaming ignores
+	// this entirely (see streamStallTimeout).
+	defaultHTTPTimeout = 300 * time.Second
+	// streamStallTimeout bounds *silence* on a streaming response, not its total
+	// duration. The stream is aborted only when no bytes — neither a token nor a
+	// provider heartbeat — arrive for this long. http.Client.Timeout cannot be
+	// used for streaming: it caps the whole response lifetime including the body
+	// read, so a healthy long generation would be killed mid-stream.
+	streamStallTimeout = 120 * time.Second
 )
 
 // ---------------------------------------------------------------------------
@@ -601,7 +613,23 @@ func CompatibleStream(
 		return luft.ProviderResponse{}, fmt.Errorf("luft: marshal openai stream request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	// Streaming must not be bound by http.Client.Timeout: that timer caps the
+	// entire response lifetime — including the body read — so a healthy
+	// generation streaming for longer than the timeout is killed mid-stream
+	// ("context deadline exceeded ... while reading body"). Use a copy of the
+	// client with no wall-clock timeout and guard against a *stalled* connection
+	// with the idle watchdog below instead.
+	streamClient := httpClient
+	if streamClient.Timeout != 0 {
+		c := *streamClient
+		c.Timeout = 0
+		streamClient = &c
+	}
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(streamCtx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return luft.ProviderResponse{}, fmt.Errorf("luft: build openai stream request: %w", err)
 	}
@@ -609,7 +637,7 @@ func CompatibleStream(
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := httpClient.Do(httpReq)
+	resp, err := streamClient.Do(httpReq)
 	if err != nil {
 		return luft.ProviderResponse{}, fmt.Errorf("luft: openai stream http: %w", err)
 	}
@@ -631,8 +659,20 @@ func CompatibleStream(
 	var stopReason string
 	var usage luft.Usage
 
+	// Idle watchdog: abort only if NO bytes (data line or provider heartbeat)
+	// arrive for streamStallTimeout. Reset on every line, so a long but live
+	// generation — or a slow time-to-first-token while a reasoning model thinks
+	// and the server sends heartbeats — keeps the stream open.
+	var stalled atomic.Bool
+	watchdog := time.AfterFunc(streamStallTimeout, func() {
+		stalled.Store(true)
+		cancel()
+	})
+	defer watchdog.Stop()
+
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
+		watchdog.Reset(streamStallTimeout)
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -713,6 +753,9 @@ func CompatibleStream(
 	}
 
 	if err := scanner.Err(); err != nil {
+		if stalled.Load() {
+			return luft.ProviderResponse{}, fmt.Errorf("luft: openai stream stalled: no data for %s: %w", streamStallTimeout, err)
+		}
 		return luft.ProviderResponse{}, fmt.Errorf("luft: openai stream read: %w", err)
 	}
 

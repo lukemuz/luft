@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lukemuz/luft"
 )
@@ -128,6 +129,52 @@ func TestCompatibleStream(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCompatibleStreamSurvivesSlowStream is the regression test for the
+// streaming hang: a generation that streams for longer than the HTTP client's
+// wall-clock Timeout must NOT be killed. http.Client.Timeout caps the whole
+// response including the body read, so CompatibleStream now zeroes it and relies
+// on the idle stall watchdog instead.
+func TestCompatibleStreamSurvivesSlowStream(t *testing.T) {
+	lines := []string{
+		`data: {"choices":[{"delta":{"content":"a"},"index":0,"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{"content":"b"},"index":0,"finish_reason":null}]}`,
+		`data: {"choices":[{"delta":{},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`,
+		`data: [DONE]`,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, _ := w.(http.Flusher)
+		for _, line := range lines {
+			time.Sleep(80 * time.Millisecond) // ~320ms total, well past the 100ms client timeout
+			if _, err := w.Write([]byte(line + "\n")); err != nil {
+				return
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	}))
+	defer srv.Close()
+
+	client := srv.Client()
+	client.Timeout = 100 * time.Millisecond // would abort the stream mid-read if it still applied
+
+	var got []luft.ContentBlock
+	resp, err := CompatibleStream(context.Background(), client, "k", srv.URL,
+		luft.ProviderRequest{Model: "m", Messages: []luft.Message{luft.NewUserMessage("hi")}},
+		func(b luft.ContentBlock) { got = append(got, b) }, false, false)
+	if err != nil {
+		t.Fatalf("slow but healthy stream should complete, got error: %v", err)
+	}
+	if resp.StopReason != "end_turn" {
+		t.Errorf("stop reason = %q, want end_turn", resp.StopReason)
+	}
+	if len(got) != 2 {
+		t.Errorf("got %d deltas, want 2", len(got))
 	}
 }
 

@@ -39,6 +39,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Streaming no longer dies on long generations. `http.Client.Timeout` caps the
+  entire response lifetime — including the streaming body read — so any single
+  model turn that streamed for longer than the 60s client timeout was killed
+  mid-stream with "context deadline exceeded ... while reading body", aborting
+  the whole turn. `openai.CompatibleStream` now runs with no wall-clock timeout
+  and instead uses an idle **stall watchdog** (`streamStallTimeout`, 120s): the
+  stream is aborted only when no bytes — token or provider heartbeat — arrive
+  for that long, so healthy long/reasoning generations complete. A stall is
+  reported distinctly from an ordinary read error.
+- Non-streaming requests get a more realistic default timeout (60s → 300s).
+  Subagents, the summarizer, and `Extract` use the non-streaming `Call` path,
+  where a slow or reasoning model on a large context can legitimately run for
+  minutes; 60s was cutting them off. Applies to the OpenAI and OpenRouter
+  providers.
 - CLI: tool-approval prompts no longer get erased by the activity spinner. The
   spinner's repaint loop shares stderr with the confirmer, so an `approve?`
   prompt was wiped every 80ms — the agent looked hung when it was actually

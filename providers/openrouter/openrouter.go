@@ -13,7 +13,10 @@ import (
 
 const (
 	openRouterDefaultBaseURL = "https://openrouter.ai"
-	defaultHTTPTimeout       = 60 * time.Second
+	// Generous because non-streaming Call paths (subagents, the summarizer,
+	// Extract) can run for minutes on a slow or reasoning model. Streaming is
+	// not bound by this — see openai.CompatibleStream's stall watchdog.
+	defaultHTTPTimeout = 300 * time.Second
 )
 
 // Config holds configuration for the OpenRouter provider.
