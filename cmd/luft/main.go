@@ -5,10 +5,13 @@
 //	main agent           (z-ai/glm-5.2 by default — configurable via -model)
 //	  ├── direct tools   workspace read-only + trained bash + trained editor
 //	  │                  + todo + clock + batch
-//	  ├── explore        subagent on google/gemini-3.5-flash (-explore-model) —
+//	  ├── explore        subagent on openai/gpt-oss-120b@cerebras (-explore-model)
+//	  │                  — a small model served at very high throughput;
 //	  │                  workspace read-only + restricted bash + batch + clock.
-//	  │                  Used for cheap, parallelisable inspection; its
-//	  │                  iteration history never enters the main context.
+//	  │                  Used for cheap, fast, parallelisable inspection; its
+//	  │                  iteration history never enters the main context. The
+//	  │                  "@cerebras" suffix pins the Cerebras upstream on
+//	  │                  OpenRouter for throughput (see splitProviderRouting).
 //	  ├── plan           subagent on z-ai/glm-5.2 (-plan-model) — read-only
 //	  │                  tools, no shell or edits. Used when the main agent
 //	  │                  wants a focused reasoner for design or hard debugging.
@@ -35,7 +38,7 @@
 // Pass -dir to operate on a different directory.
 //
 // Models default to z-ai/glm-5.2 for the main agent and plan subagent,
-// and google/gemini-3.5-flash for the explore subagent. Override with
+// and openai/gpt-oss-120b@cerebras for the explore subagent. Override with
 // -model / -explore-model / -plan-model to use any OpenRouter-supported
 // model id.
 //
@@ -43,7 +46,7 @@
 //
 //	-dir            working directory the agent is sandboxed to (default cwd)
 //	-model          main-agent model id (default z-ai/glm-5.2)
-//	-explore-model  model used for the explore subagent (default google/gemini-3.5-flash)
+//	-explore-model  model used for the explore subagent (default openai/gpt-oss-120b@cerebras; append @<provider> to pin an OpenRouter upstream)
 //	-plan-model     model used for the plan subagent (default z-ai/glm-5.2)
 //	-implement-model model used for the implement subagent (default: -model)
 //	-no-subagents   disable all subagent tools (explore, plan, implement)
@@ -111,7 +114,7 @@ Available tools:
 - batch: run 2+ independent read-only calls in one turn. Default for independent reads/greps/inspections; skip only when a later call depends on an earlier result.
 - web_fetch (when available): download an http(s) URL and return its content as text. HTML is converted to a plain-text approximation; long pages paginate via max_length + start_index. Use this for documentation lookups and inspecting URLs from error messages.
 - web_search (when available): run a web search and get results with citations. Use when you do NOT already have a URL — current library docs, an unfamiliar API, or an error message you want to look up. Pair with web_fetch to read a promising result in full.
-- explore (when available): bounded research specialist on a fast, cheap model — repo inspection or well-scoped Q&A (provided context, fetched docs, web search, or its own knowledge); returns a concise summary with file dumps and fetches kept out of your context
+- explore (when available): bounded research specialist on a small model served at very high throughput — extremely fast and cheap, so lean on it freely and fan several out in parallel. Repo inspection or well-scoped Q&A (provided context, fetched docs, web search, or its own knowledge); returns a concise summary with file dumps and fetches kept out of your context
 - plan (when available): design specialist running in a fresh, focused context — get a structured plan before non-trivial multi-file edits, interface changes, or when stuck on a hypothesis
 - implement (when available): a clone of yourself with the full editing toolset, running in its own clean context — delegate a well-scoped, independently-verifiable change you've already designed and get back a summary of what it did (its edit/test churn stays out of your context). You still review its diff.
 - now: current time
@@ -203,7 +206,7 @@ Your final message is the ONLY thing the orchestrator sees — your iteration hi
 func main() {
 	dir := flag.String("dir", ".", "working directory the agent is sandboxed to (defaults to the current directory)")
 	model := flag.String("model", envOr("LUFT_MODEL", "z-ai/glm-5.2"), "main-agent model id (any OpenRouter slug; env: LUFT_MODEL)")
-	exploreModel := flag.String("explore-model", envOr("LUFT_EXPLORE_MODEL", "google/gemini-3.5-flash"), "model id for the explore subagent (env: LUFT_EXPLORE_MODEL)")
+	exploreModel := flag.String("explore-model", envOr("LUFT_EXPLORE_MODEL", "openai/gpt-oss-120b@cerebras"), "model id for the explore subagent; append @<provider> to pin an OpenRouter upstream (env: LUFT_EXPLORE_MODEL)")
 	planModel := flag.String("plan-model", envOr("LUFT_PLAN_MODEL", "z-ai/glm-5.2"), "model id for the plan subagent (env: LUFT_PLAN_MODEL)")
 	implementModel := flag.String("implement-model", envOr("LUFT_IMPLEMENT_MODEL", ""), "model id for the implement subagent (env: LUFT_IMPLEMENT_MODEL; defaults to -model)")
 	noSubagents := flag.Bool("no-subagents", false, "disable all subagent tools (explore, plan, implement)")
@@ -370,7 +373,7 @@ func main() {
 			WithProviderTools(searchTools...)
 		exploreBinding, err := subagent.New(subagent.Config{
 			Name:        "explore",
-			Description: "Delegate a bounded research task to a fast, cheap specialist. Two main shapes: (a) repo research — find callers, audit a pattern, summarise a module, locate references; (b) bounded Q&A — answer a well-scoped question from provided context, fetched docs, web search, or general knowledge (e.g. 'what does this stdlib function do', 'summarise this RFC's caching rules'). The specialist has read-only filesystem tools, restricted bash, web_fetch, web_search, and batch fan-out; it returns a concise summary and its iteration history stays out of your context. Pass a self-contained task description with any context the specialist needs. Use for breadth — surveys, usage audits, well-scoped research. For the specific code you are about to edit, read it yourself: the summary loses detail you need to write a correct change, and you can't cheaply verify what you didn't see.",
+			Description: "Delegate a bounded research task to an EXTREMELY fast, cheap specialist (runs on a small model served at very high throughput, so it returns in a fraction of the time and cost of a main-model turn). Lean on it freely — when in doubt, explore. Two main shapes: (a) repo research — find callers, audit a pattern, summarise a module, locate references; (b) bounded Q&A — answer a well-scoped question from provided context, fetched docs, web search, or general knowledge (e.g. 'what does this stdlib function do', 'summarise this RFC's caching rules'). The specialist has read-only filesystem tools, restricted bash, web_fetch, web_search, and batch fan-out; it returns a concise summary and its iteration history stays out of your context. Pass a self-contained task description with any context the specialist needs. Use for breadth — surveys, usage audits, well-scoped research — and prefer firing several in parallel over reading widely yourself. For the specific code you are about to edit, read it yourself: the summary comes from a small model, so it loses detail you need to write a correct change, and you can't cheaply verify what you didn't see.",
 			Client:      exploreClient,
 			System:      withMemory(exploreSystemPrompt),
 			Tools:       exploreTools,

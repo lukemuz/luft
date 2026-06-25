@@ -40,6 +40,39 @@ type openAIChatRequest struct {
 	Stop        []string          `json:"stop,omitempty"`
 	Seed        *int              `json:"seed,omitempty"`
 	Stream      bool              `json:"stream,omitempty"`
+	// Provider carries an opaque, endpoint-specific routing object. It is unset
+	// for stock OpenAI; OpenRouter uses it for provider routing (the "provider"
+	// field). Raw JSON keeps this package agnostic about the routing schema.
+	Provider json.RawMessage `json:"provider,omitempty"`
+}
+
+// CompatibleOption configures an OpenAI-compatible request beyond the canonical
+// ProviderRequest. Options are how endpoint-specific extras (e.g. OpenRouter
+// provider routing) reach the request body without widening the call signature
+// or leaking those concepts into the core types.
+type CompatibleOption func(*compatibleConfig)
+
+type compatibleConfig struct {
+	providerRouting json.RawMessage
+}
+
+func applyCompatibleOptions(opts []CompatibleOption) compatibleConfig {
+	var c compatibleConfig
+	for _, opt := range opts {
+		opt(&c)
+	}
+	return c
+}
+
+// WithProviderRouting attaches an opaque routing object as the request's
+// "provider" field. routing is the VALUE of that field, e.g.
+// {"order":["cerebras"]}. A nil or empty routing is a no-op.
+func WithProviderRouting(routing json.RawMessage) CompatibleOption {
+	return func(c *compatibleConfig) {
+		if len(routing) > 0 {
+			c.providerRouting = routing
+		}
+	}
 }
 
 // openAIMessage is a wire message. Content is `any` so request paths can
@@ -514,6 +547,7 @@ func CompatibleCall(
 	req luft.ProviderRequest,
 	cacheCompatible bool,
 	allowProviderTools bool,
+	opts ...CompatibleOption,
 ) (luft.ProviderResponse, error) {
 	openaiTools, err := toOpenAITools(req.Tools, req.ProviderTools, cacheCompatible, allowProviderTools)
 	if err != nil {
@@ -524,6 +558,7 @@ func CompatibleCall(
 		MaxTokens: req.MaxTokens,
 		Messages:  toOpenAIMessages(req.System, req.SystemCache, req.Messages, cacheCompatible),
 		Tools:     openaiTools,
+		Provider:  applyCompatibleOptions(opts).providerRouting,
 	}
 	applyChatGeneration(&chatReq, req.Generation)
 
@@ -582,6 +617,7 @@ func CompatibleStream(
 	onDelta func(luft.ContentBlock),
 	cacheCompatible bool,
 	allowProviderTools bool,
+	opts ...CompatibleOption,
 ) (luft.ProviderResponse, error) {
 	openaiTools, err := toOpenAITools(req.Tools, req.ProviderTools, cacheCompatible, allowProviderTools)
 	if err != nil {
@@ -593,6 +629,7 @@ func CompatibleStream(
 		Messages:  toOpenAIMessages(req.System, req.SystemCache, req.Messages, cacheCompatible),
 		Tools:     openaiTools,
 		Stream:    true,
+		Provider:  applyCompatibleOptions(opts).providerRouting,
 	}
 	applyChatGeneration(&chatReq, req.Generation)
 
