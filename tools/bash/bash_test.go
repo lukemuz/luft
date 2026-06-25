@@ -146,6 +146,59 @@ func TestDefaultLenientOnNonZeroExit(t *testing.T) {
 	}
 }
 
+func TestLaunchErrorIsSurfaced(t *testing.T) {
+	// A shell that doesn't exist can't run anything; the real OS error must be
+	// reported instead of a bare exit=-1 with empty output.
+	tool, err := New(Config{Mode: ModeUnrestricted, Shell: "/no/such/shell"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := dispatch(t, tool, bashInput{Command: "echo hi"})
+	if err != nil {
+		t.Fatalf("lenient mode should not hard-error: %v", err)
+	}
+	if !strings.Contains(out, "exit=-1") || !strings.Contains(out, "could not run command") {
+		t.Errorf("expected a surfaced launch error, got %q", out)
+	}
+	if !strings.Contains(out, "/no/such/shell") {
+		t.Errorf("expected the shell path in the error, got %q", out)
+	}
+}
+
+func TestLaunchErrorIsErrorWhenStrict(t *testing.T) {
+	tool, err := New(Config{Mode: ModeUnrestricted, Shell: "/no/such/shell", ReportExitError: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dispatch(t, tool, bashInput{Command: "echo hi"}); err == nil {
+		t.Fatal("a command that can't launch should be a tool error in strict mode")
+	}
+}
+
+func TestResolveShellPrefersConfigured(t *testing.T) {
+	if got := resolveShell("/custom/sh"); got != "/custom/sh" {
+		t.Errorf("configured shell should win, got %q", got)
+	}
+	// With no config, it resolves to a real, runnable shell on this host.
+	got := resolveShell("")
+	if !isExecutableFile(got) {
+		// On PATH-only hosts resolveShell may return a bare name it found via
+		// LookPath, which is already absolute; anything else is a real bug.
+		t.Errorf("auto-resolved shell %q is not an executable file", got)
+	}
+	tool, err := New(Config{Mode: ModeUnrestricted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := dispatch(t, tool, bashInput{Command: "echo resolved-ok"})
+	if err != nil {
+		t.Fatalf("auto-resolved shell should run: %v", err)
+	}
+	if !strings.Contains(out, "resolved-ok") {
+		t.Errorf("auto-resolved shell did not execute, got %q", out)
+	}
+}
+
 func TestStandardModeRequiresConfirmation(t *testing.T) {
 	tool, err := New(Config{Mode: ModeStandard})
 	if err != nil {

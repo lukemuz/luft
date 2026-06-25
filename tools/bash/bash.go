@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -74,6 +75,12 @@ type Config struct {
 	// Mode selects the safety policy. Zero value is ModeRestricted.
 	Mode Mode
 
+	// Shell is the shell used to run commands via `<shell> -c <cmd>`. Empty
+	// resolves at construction: /bin/sh if it exists, else `sh` or `bash` on
+	// PATH, else $SHELL — so a host without /bin/sh (minimal containers, Nix,
+	// some sandboxes) still works. Set it explicitly to pin a specific shell.
+	Shell string
+
 	// Timeout caps each command's wall-clock duration. 0 uses 30s.
 	Timeout time.Duration
 
@@ -105,6 +112,7 @@ type Config struct {
 // Tool is the bash tool binding.
 type Tool struct {
 	cfg     Config
+	shell   string
 	allow   map[string]struct{}
 	deny    []*regexp.Regexp
 	binding luft.ToolBinding
@@ -154,7 +162,7 @@ func New(cfg Config) (*Tool, error) {
 		cfg.Root = abs
 	}
 
-	t := &Tool{cfg: cfg, allow: map[string]struct{}{}}
+	t := &Tool{cfg: cfg, shell: resolveShell(cfg.Shell), allow: map[string]struct{}{}}
 	for _, name := range defaultAllow {
 		t.allow[name] = struct{}{}
 	}
@@ -177,6 +185,11 @@ func New(cfg Config) (*Tool, error) {
 func (t *Tool) Toolset() luft.Toolset {
 	return luft.Tools(t.binding)
 }
+
+// Shell returns the resolved shell path commands run through. Useful for
+// surfacing the effective shell in a UI (e.g. a startup banner) so a
+// misconfigured or missing shell is visible before the first command.
+func (t *Tool) Shell() string { return t.shell }
 
 // TrainedHandler returns a ToolFunc with the input shape Anthropic's
 // bash_20250124 trained tool emits ({"command": "...", "restart": bool}).
@@ -254,7 +267,7 @@ func (t *Tool) run(ctx context.Context, in bashInput) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, t.cfg.Timeout)
 	defer cancel()
 
-	c := exec.CommandContext(cctx, defaultShell, "-c", cmd)
+	c := exec.CommandContext(cctx, t.shell, "-c", cmd)
 	c.Dir = cwd
 	var buf bytes.Buffer
 	c.Stdout = &buf
@@ -266,11 +279,16 @@ func (t *Tool) run(ctx context.Context, in bashInput) (string, error) {
 
 	out := truncate(buf.Bytes(), t.cfg.MaxOutputBytes)
 	exit := 0
+	launchErr := "" // non-empty when the command could not be started at all
 	if runErr != nil {
 		if ee, ok := runErr.(*exec.ExitError); ok {
 			exit = ee.ExitCode()
 		} else {
+			// Not an ExitError: the process never ran (shell missing, working
+			// dir gone, exec blocked by the sandbox, ...). Surface the real OS
+			// error instead of a bare exit=-1, which is undiagnosable.
 			exit = -1
+			launchErr = runErr.Error()
 		}
 	}
 
@@ -281,6 +299,9 @@ func (t *Tool) run(ctx context.Context, in bashInput) (string, error) {
 	}
 	header += "]\n"
 	result := header + out
+	if launchErr != "" {
+		result += fmt.Sprintf("could not run command via %q: %s\n", t.shell, launchErr)
+	}
 
 	// In strict mode a failure is surfaced as a tool error so the UI marks it
 	// failed and the model can't overlook a buried exit code. The full output
@@ -337,6 +358,37 @@ func (t *Tool) resolveCwd(cwd string) (string, error) {
 		return "", fmt.Errorf("cwd %q escapes workspace root", cwd)
 	}
 	return abs, nil
+}
+
+// resolveShell picks the shell to run commands with. An explicit configured
+// path wins (returned as-is so a bad value surfaces a clear launch error);
+// otherwise it tries /bin/sh, then `sh`/`bash` on PATH, then $SHELL, so hosts
+// without /bin/sh still work. Falls back to /bin/sh if nothing is found, so
+// run() reports a precise "no such file" rather than failing silently.
+func resolveShell(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if isExecutableFile(defaultShell) {
+		return defaultShell
+	}
+	for _, name := range []string{"sh", "bash"} {
+		if p, err := exec.LookPath(name); err == nil {
+			return p
+		}
+	}
+	if sh := os.Getenv("SHELL"); isExecutableFile(sh) {
+		return sh
+	}
+	return defaultShell
+}
+
+func isExecutableFile(path string) bool {
+	if path == "" {
+		return false
+	}
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir()
 }
 
 func firstToken(cmd string) string {

@@ -39,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bash no longer dies opaquely when the shell can't launch. A hardcoded
+  `/bin/sh` that doesn't exist (minimal containers, Nix, some sandboxes), a
+  missing working dir, or a blocked exec made `c.Run()` fail before running
+  anything, and the tool reported a bare `exit=-1` with empty output — every
+  command, undiagnosable. The real OS error is now surfaced in the result, the
+  shell is auto-resolved (`/bin/sh`, then `sh`/`bash` on PATH, then `$SHELL`)
+  via new `bash.Config.Shell`, overridable with `-shell` / `LUFT_SHELL`, and the
+  startup banner shows the resolved shell.
 - Bash failures are no longer silent. The bash tool always returned success with
   the exit code buried in an `[exit=N]` header, so a failed command (e.g. an `rm`
   that hit a permission error) rendered as a green ✓ and a weaker model would
