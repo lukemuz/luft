@@ -97,6 +97,55 @@ func TestTimeoutMarksTimedOut(t *testing.T) {
 	}
 }
 
+func TestReportExitErrorSurfacesFailure(t *testing.T) {
+	tool, err := New(Config{Mode: ModeUnrestricted, ReportExitError: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A non-zero exit must come back as an error, with the output preserved.
+	out, err := dispatch(t, tool, bashInput{Command: "echo boom >&2; exit 3"})
+	if err == nil {
+		t.Fatal("expected a tool error for a non-zero exit")
+	}
+	if out != "" {
+		t.Errorf("expected empty success output on error, got %q", out)
+	}
+	if !strings.Contains(err.Error(), "exit=3") || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error should carry the exit code and output, got %q", err.Error())
+	}
+	// A successful command is unaffected.
+	if _, err := dispatch(t, tool, bashInput{Command: "echo ok"}); err != nil {
+		t.Errorf("zero-exit command should not error, got %v", err)
+	}
+}
+
+func TestReportExitErrorTimeoutIsError(t *testing.T) {
+	tool, err := New(Config{Mode: ModeUnrestricted, Timeout: 50 * time.Millisecond, ReportExitError: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = dispatch(t, tool, bashInput{Command: "sleep 2"})
+	if err == nil || !strings.Contains(err.Error(), "timeout=true") {
+		t.Fatalf("expected a timeout error, got %v", err)
+	}
+}
+
+func TestDefaultLenientOnNonZeroExit(t *testing.T) {
+	// Without ReportExitError, a non-zero exit is plain output (no tool error),
+	// so read-only callers (e.g. grep finding nothing) aren't flagged as failed.
+	tool, err := New(Config{Mode: ModeUnrestricted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := dispatch(t, tool, bashInput{Command: "exit 1"})
+	if err != nil {
+		t.Fatalf("default mode should not error on non-zero exit, got %v", err)
+	}
+	if !strings.Contains(out, "exit=1") {
+		t.Errorf("expected exit code in output, got %q", out)
+	}
+}
+
 func TestStandardModeRequiresConfirmation(t *testing.T) {
 	tool, err := New(Config{Mode: ModeStandard})
 	if err != nil {

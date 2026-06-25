@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bash failures are no longer silent. The bash tool always returned success with
+  the exit code buried in an `[exit=N]` header, so a failed command (e.g. an `rm`
+  that hit a permission error) rendered as a green ✓ and a weaker model would
+  miss it and loop. New `bash.Config.ReportExitError` returns a non-zero exit or
+  timeout as a tool error (full output preserved) so the CLI shows ✗ and the
+  model can't overlook it; the luft CLI enables it for the main/editing bash.
+  Read-only subagent bash stays lenient, so a `grep` that finds nothing isn't
+  flagged as a failure.
+- CLI: hitting the per-turn iteration cap (`-max-iter`) no longer discards the
+  turn. It's a soft limit, not a crash — the partial conversation is kept and
+  the run can be resumed by typing `continue`, instead of losing all the work.
 - Streaming no longer dies on long generations. `http.Client.Timeout` caps the
   entire response lifetime — including the streaming body read — so any single
   model turn that streamed for longer than the 60s client timeout was killed

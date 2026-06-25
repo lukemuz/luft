@@ -418,7 +418,10 @@ func main() {
 
 	// --- main-agent edit tools ---------------------------------------------
 
-	mainBashTool, err := bash.New(bash.Config{Root: *dir, Mode: mode})
+	// ReportExitError: a failed command (non-zero exit or timeout) comes back
+	// as a tool error, so the CLI shows it failed and the model can't mistake
+	// it for success — the failure mode that sends the agent into a retry loop.
+	mainBashTool, err := bash.New(bash.Config{Root: *dir, Mode: mode, ReportExitError: true})
 	if err != nil {
 		log.Fatal(err)
 	}

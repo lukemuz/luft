@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -146,6 +147,21 @@ func (s *session) runTurn(ctx context.Context, input string) {
 	sp.Stop()
 	fmt.Println()
 
+	// Tokens were spent regardless of how the loop ended; always account for them.
+	s.usage.InputTokens += result.Usage.InputTokens
+	s.usage.OutputTokens += result.Usage.OutputTokens
+	s.usage.CacheCreationTokens += result.Usage.CacheCreationTokens
+	s.usage.CacheReadTokens += result.Usage.CacheReadTokens
+
+	if errors.Is(err, luft.ErrMaxIter) {
+		// The iteration cap is a safety limit, not a crash. result.Messages
+		// ends on a clean tool-result boundary, so keep the whole turn: the
+		// user can type "continue" to resume instead of losing all the work.
+		s.history = result.Messages
+		fmt.Fprintln(os.Stderr, yellow("⚠ paused")+grey(fmt.Sprintf(" at the %d model-call limit — progress kept. Type ", s.agent.MaxIter))+
+			bold("continue")+grey(" to resume, or redirect it. (Raise the cap with -max-iter.)"))
+		return
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, red("✗ error: ")+err.Error())
 		if n := len(s.history); n > 0 {
@@ -155,10 +171,6 @@ func (s *session) runTurn(ctx context.Context, input string) {
 	}
 
 	s.history = result.Messages
-	s.usage.InputTokens += result.Usage.InputTokens
-	s.usage.OutputTokens += result.Usage.OutputTokens
-	s.usage.CacheCreationTokens += result.Usage.CacheCreationTokens
-	s.usage.CacheReadTokens += result.Usage.CacheReadTokens
 }
 
 // runCommand dispatches a slash command. Returns true if the REPL
