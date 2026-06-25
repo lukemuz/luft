@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- CLI: tool-approval prompts no longer get erased by the activity spinner. The
+  spinner's repaint loop shares stderr with the confirmer, so an `approve?`
+  prompt was wiped every 80ms — the agent looked hung when it was actually
+  waiting on stdin (every edit, and every `bash` in `standard`/`unrestricted`
+  mode, hits this). The confirmer now suspends the spinner while it owns the
+  terminal and resumes it afterward. EOF/closed stdin declines cleanly instead
+  of leaving a dangling prompt line.
+
+### Changed
+
+- CLI: clearer approval prompt with a full key legend `[y/a/A/N]`, and a new
+  `A` ("approve all tools this session") option alongside the existing `a`
+  ("approve all of this tool"). The startup banner now shows an `approve` row
+  so the auto-approve mode (`-yes`) and per-call controls are discoverable.
+
 ## v0.2.0 — 2026-06-07
 
 ### Added

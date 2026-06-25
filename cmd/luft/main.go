@@ -60,6 +60,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -235,7 +236,12 @@ func main() {
 	}()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	confirm := makeConfirmer(*autoYes)
+
+	// One spinner for the whole session, shared between the REPL turn loop
+	// and the confirmer so the confirmer can suspend it while it owns the
+	// terminal for an approval prompt.
+	sp := newSpinner(os.Stderr)
+	confirm := makeConfirmer(*autoYes, sp, os.Stdin, os.Stderr)
 
 	// Summarizer for /compact, automatic in-loop trimming, and oversized-
 	// result compression. Defaults to glm-5.2 (the main-tier model); override
@@ -396,7 +402,7 @@ func main() {
 		webTools,
 		luft.Tools(subagentBindings...),
 	).CacheLast(luft.Ephemeral()). // cache the entire tool block — stable per session
-		WithProviderTools(searchTools...)
+					WithProviderTools(searchTools...)
 
 	agent := luft.Agent{
 		Client: mainClient,
@@ -445,6 +451,11 @@ func main() {
 		compressStatus = fmt.Sprintf("%s %s", green("on"), grey(fmt.Sprintf("(>%d B)", *resultBudget)))
 	}
 	row("compress", compressStatus)
+	approveStatus := grey("prompt") + grey(" (y/a/A per call)")
+	if *autoYes {
+		approveStatus = yellow("auto") + grey(" (-yes: every call approved)")
+	}
+	row("approve", approveStatus)
 	row("dir", abs)
 	if resolvedLog != "" {
 		row("log", resolvedLog)
@@ -458,6 +469,7 @@ func main() {
 		provider:   provider,
 		memory:     memory,
 		logPath:    resolvedLog,
+		sp:         sp,
 	}
 	s.repl(ctx)
 }
@@ -499,12 +511,17 @@ func mustClient(provider luft.Provider, model string) *luft.Client {
 	return c
 }
 
-func makeConfirmer(autoYes bool) func(ctx context.Context, b luft.ToolBinding, input json.RawMessage) (bool, error) {
-	reader := bufio.NewReader(os.Stdin)
+// makeConfirmer builds the interactive tool-approval callback. in/out are the
+// streams it prompts on (os.Stdin/os.Stderr in production; injectable in
+// tests). sp is suspended for the duration of each prompt so its repaint loop
+// can't erase the prompt off the terminal.
+func makeConfirmer(autoYes bool, sp *spinner, in io.Reader, out io.Writer) func(ctx context.Context, b luft.ToolBinding, input json.RawMessage) (bool, error) {
+	reader := bufio.NewReader(in)
 	var mu sync.Mutex
 	approvedAll := map[string]bool{} // tool names whitelisted for the session via "a"
+	yesAll := autoYes                // session-wide auto-approve, settable at the prompt via "A"
 	return func(ctx context.Context, b luft.ToolBinding, input json.RawMessage) (bool, error) {
-		if !b.Meta.RequiresConfirmation || autoYes {
+		if !b.Meta.RequiresConfirmation {
 			return true, nil
 		}
 		// Tool calls can run concurrently; hold the lock across the whole
@@ -512,25 +529,41 @@ func makeConfirmer(autoYes bool) func(ctx context.Context, b luft.ToolBinding, i
 		// approval set is accessed safely.
 		mu.Lock()
 		defer mu.Unlock()
-		if approvedAll[b.Tool.Name] {
+		if yesAll || approvedAll[b.Tool.Name] {
 			return true, nil
 		}
-		fmt.Fprintf(os.Stderr, "\n[approve %s]\n", b.Tool.Name)
+		// Suspend the spinner for the duration of the prompt: its repaint
+		// loop writes to the same stream and would otherwise erase the
+		// prompt line every tick, leaving the CLI looking hung while it
+		// blocks on stdin.
+		sp.Suspend()
+		defer sp.Resume()
+
+		fmt.Fprintf(out, "\n%s %s\n", yellow("⏵ approve"), bold(b.Tool.Name))
 		if preview, ok := renderEditPreview(b.Tool.Name, input); ok {
-			fmt.Fprint(os.Stderr, preview)
+			fmt.Fprint(out, preview)
 		} else if compact := compactJSON(input); compact != "" {
-			fmt.Fprintf(os.Stderr, "  input: %s\n", compact)
+			fmt.Fprintf(out, "  %s %s\n", grey("input:"), compact)
 		}
-		fmt.Fprintf(os.Stderr, "  approve? [y/a/N]  %s ", dim("(a = approve all "+b.Tool.Name+" this session)"))
+		fmt.Fprintf(out, "  approve? %s  %s ",
+			bold("[y/a/A/N]"),
+			dim("y=yes · a=all "+b.Tool.Name+" · A=all tools · N=no"))
 		line, err := reader.ReadString('\n')
-		if err != nil {
+		if err != nil && line == "" {
+			// EOF (e.g. piped/closed stdin) or read error with nothing typed:
+			// treat as a decline rather than silently approving. Print a newline
+			// so the next output doesn't run onto the prompt line.
+			fmt.Fprintln(out)
 			return false, nil
 		}
-		switch strings.TrimSpace(strings.ToLower(line)) {
+		switch strings.TrimSpace(line) {
+		case "A", "All", "ALL":
+			yesAll = true
+			return true, nil
 		case "a", "all":
 			approvedAll[b.Tool.Name] = true
 			return true, nil
-		case "y", "yes":
+		case "y", "Y", "yes", "Yes":
 			return true, nil
 		default:
 			return false, nil
