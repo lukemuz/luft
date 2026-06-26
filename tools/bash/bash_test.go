@@ -49,6 +49,29 @@ func TestRestrictedRejectsMetacharacters(t *testing.T) {
 	if _, err := dispatch(t, tool, bashInput{Command: "echo a; echo b"}); err == nil {
 		t.Fatal("expected rejection of ; metacharacter")
 	}
+	for _, c := range []string{"echo a && echo b", "echo $HOME", "cat </etc/passwd", "echo a > b"} {
+		if _, err := dispatch(t, tool, bashInput{Command: c}); err == nil {
+			t.Fatalf("expected rejection of %q", c)
+		}
+	}
+}
+
+func TestRestrictedAllowsPipeOfAllowedCommands(t *testing.T) {
+	tool, err := New(Config{Mode: ModeRestricted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := dispatch(t, tool, bashInput{Command: "echo hello | cat"})
+	if err != nil {
+		t.Fatalf("pipe of allowlisted commands should run: %v", err)
+	}
+	if !strings.Contains(out, "hello") {
+		t.Fatalf("pipe did not execute, got %q", out)
+	}
+	// A pipeline stage that is not allowlisted is still rejected.
+	if _, err := dispatch(t, tool, bashInput{Command: "echo hi | rm -rf x"}); err == nil {
+		t.Fatal("expected rejection: rm is not on the allowlist")
+	}
 }
 
 func TestStandardDeniesDangerous(t *testing.T) {
