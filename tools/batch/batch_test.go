@@ -87,6 +87,36 @@ func TestBatchOmitsItself(t *testing.T) {
 	}
 }
 
+func TestBatchToleratesDoubleEncodedArgs(t *testing.T) {
+	// Some models serialise nested tool arguments as JSON strings rather than
+	// nested JSON: the whole "calls" array arrives as a quoted string, and each
+	// "input" likewise. The batch tool must unwrap both layers instead of
+	// failing the call.
+	var gotInput string
+	echo := func(_ context.Context, raw json.RawMessage) (string, error) {
+		gotInput = string(raw)
+		return "echoed", nil
+	}
+	b := New(Config{Bindings: []luft.ToolBinding{
+		mkBinding("read_file", luft.ToolMetadata{}, echo),
+	}})
+
+	quote := func(s string) string { q, _ := json.Marshal(s); return string(q) }
+	callsArr := fmt.Sprintf(`[{"name":"read_file","input":%s}]`, quote(`{"path":"a.go"}`))
+	payload := fmt.Sprintf(`{"calls":%s}`, quote(callsArr))
+
+	out, err := b.Func(context.Background(), json.RawMessage(payload))
+	if err != nil {
+		t.Fatalf("batch should tolerate double-encoded args: %v", err)
+	}
+	if !strings.Contains(out, "echoed") {
+		t.Fatalf("expected the unwrapped call to run, got %q", out)
+	}
+	if gotInput != `{"path":"a.go"}` {
+		t.Fatalf("nested input not unwrapped; sub-tool received %q", gotInput)
+	}
+}
+
 func TestBatchPropagatesErrors(t *testing.T) {
 	bindings := []luft.ToolBinding{
 		mkBinding("ok", luft.ToolMetadata{}, func(context.Context, json.RawMessage) (string, error) { return "fine", nil }),
