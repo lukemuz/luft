@@ -163,6 +163,8 @@ A good `AGENTS.md` is short and concrete: project conventions, how to run tests,
 | `-context-budget` | `750000` | Token budget before automatic in-loop summarization kicks in (env: `LUFT_CONTEXT_BUDGET`) |
 | `-result-budget` | `12000` | Byte threshold above which noisy `bash` output is summarized; `0` disables (env: `LUFT_RESULT_BUDGET`) |
 | `-log` | (off) | JSONL session log path. Use `-log auto` to write under `~/.config/luft/sessions/<timestamp>.jsonl`, or pass an explicit path. |
+| `-continue` | false | Resume the most recent persisted session for the current working directory |
+| `-resume <id>` | (off) | Resume a specific session by ID (mutually exclusive with `-continue`) |
 
 ### Bash safety modes
 
@@ -197,6 +199,18 @@ Both `/cmd` and `:cmd` are accepted.
 | `/tools` | List available tools (with `[confirm]` flag) |
 | `/model <id>` | Switch the main-agent model mid-session (subagent models unchanged) |
 | `/log` | Print the active JSONL log path (if any) |
+| `/session` | Print the current session ID and its on-disk location |
+
+## Session persistence and resume
+
+Each REPL session has a stable ID and is persisted after every completed turn as a JSON snapshot under `~/.config/luft/store/<id>.json`. The conversation survives exiting the process; resume it with:
+
+- `luft -continue` — resume the **most recent** session for the current working directory.
+- `luft -resume <id>` — resume a specific session by ID.
+
+The session ID embeds a hash of the working directory as a prefix, so `-continue` scopes its lookup to sessions started in *this* directory. On resume, prior history (and accumulated token usage) is restored. If there is nothing to continue, or the stored session is corrupt, luft starts a fresh session with a notice rather than crashing. `-continue` and `-resume` are mutually exclusive.
+
+This is separate from `-log` (the JSONL event trace): `-log` records a streaming per-process trace; the session store is the durable conversation snapshot. Both can be active at once.
 
 ## Session logging
 

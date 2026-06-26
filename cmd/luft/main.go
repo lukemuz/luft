@@ -58,6 +58,8 @@
 //	-max-iter       max model calls per turn (default 30)
 //	-context-budget token budget before automatic summarization (default 750000)
 //	-result-budget  byte threshold above which bash output is summarized (default 12000; 0 disables)
+//	-continue       resume the most recent session for the current working directory
+//	-resume <id>    resume a specific session by ID (mutually exclusive with -continue)
 //	-version        print version and exit
 //
 // REPL commands:
@@ -65,6 +67,7 @@
 //	:exit / :quit          leave
 //	:reset                 clear conversation history
 //	:tokens                print accumulated token usage
+//	:session               print the current session ID and its on-disk location
 //	:help                  show this list
 package main
 
@@ -88,6 +91,7 @@ import (
 
 	"github.com/lukemuz/luft"
 	"github.com/lukemuz/luft/providers/openrouter"
+	"github.com/lukemuz/luft/stores"
 	"github.com/lukemuz/luft/tools/bash"
 	"github.com/lukemuz/luft/tools/batch"
 	"github.com/lukemuz/luft/tools/clock"
@@ -234,8 +238,14 @@ func main() {
 	contextBudget := flag.Int("context-budget", envOrInt("LUFT_CONTEXT_BUDGET", 750_000), "token budget before automatic in-loop summarization (env: LUFT_CONTEXT_BUDGET)")
 	resultBudget := flag.Int("result-budget", envOrInt("LUFT_RESULT_BUDGET", 12_000), "byte threshold above which noisy bash output is summarized; 0 disables (env: LUFT_RESULT_BUDGET)")
 	logPath := flag.String("log", "", "JSONL session log path. Pass `auto` to write under ~/.config/luft/sessions/")
+	resumeID := flag.String("resume", "", "resume a specific session by ID")
+	continueLast := flag.Bool("continue", false, "resume the most recent session for the current working directory")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *resumeID != "" && *continueLast {
+		log.Fatal("cannot use -continue and -resume together")
+	}
 
 	if *showVersion {
 		fmt.Println(version)
@@ -526,9 +536,34 @@ func main() {
 		MaxIter: *maxIter,
 	}
 
-	// --- run ---------------------------------------------------------------
+	// --- session persistence ----------------------------------------------
+
+	// The file-backed store keeps a JSON snapshot of the conversation after
+	// every turn, under ~/.config/luft/store. A nil store degrades cleanly:
+	// persistence is disabled for the run but the REPL still works.
+	storeDir, storeErr := resolveStoreDir()
+	var store *stores.FileStore
+	if storeErr == nil {
+		st, err := stores.NewFileStore(storeDir)
+		if err == nil {
+			store = st
+		} else {
+			storeErr = err
+		}
+	}
+	if store == nil {
+		fmt.Fprintf(os.Stderr, "  %s could not open session store (%v) — persistence disabled this run\n",
+			yellow("⚠"), storeErr)
+	}
 
 	abs, _ := absDir(*dir)
+
+	// Resolve the session ID and (on resume) load prior history. Every failure
+	// mode degrades to a fresh session with a notice; nothing here can abort.
+	sessionID, loaded, notice := resolveSession(ctx, store, abs, *resumeID, *continueLast)
+	if notice != "" {
+		fmt.Fprintln(os.Stderr, "  "+notice)
+	}
 	subStatus := green("on")
 	if *noSubagents {
 		subStatus = dim("off")
@@ -572,6 +607,9 @@ func main() {
 	}
 	row("approve", approveStatus)
 	row("dir", abs)
+	if store != nil {
+		row("session", sessionID)
+	}
 	if resolvedLog != "" {
 		row("log", resolvedLog)
 	}
@@ -585,6 +623,17 @@ func main() {
 		memory:     memory,
 		logPath:    resolvedLog,
 		sp:         sp,
+
+		store:     store,
+		sessionID: sessionID,
+		storeDir:  storeDir,
+		cwd:       abs,
+	}
+	if loaded != nil {
+		s.history = loaded.History
+		if u, err := luft.GetState[luft.Usage](loaded, "usage"); err == nil {
+			s.usage = u
+		}
 	}
 	s.repl(ctx)
 }

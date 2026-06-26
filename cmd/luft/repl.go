@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/lukemuz/luft"
+	"github.com/lukemuz/luft/stores"
 )
 
 // session is the mutable state owned by the REPL. It bundles the
@@ -29,6 +31,12 @@ type session struct {
 	history []luft.Message
 	usage   luft.Usage // accumulated across the session
 	logPath string     // empty if no JSONL log is active
+
+	// persistence + resume
+	store     *stores.FileStore // nil when the store dir couldn't be opened (degraded)
+	sessionID string            // stable ID for this REPL process
+	storeDir  string            // absolute dir the FileStore roots at (for /session)
+	cwd       string            // absolute working dir (for State["cwd"])
 }
 
 func (s *session) repl(ctx context.Context) {
@@ -214,6 +222,7 @@ func (s *session) runTurn(ctx context.Context, input string) {
 		// ends on a clean tool-result boundary, so keep the whole turn: the
 		// user can type "continue" to resume instead of losing all the work.
 		s.history = result.Messages
+		s.persist(ctx)
 		fmt.Fprintln(os.Stderr, yellow("⚠ paused")+grey(fmt.Sprintf(" at the %d model-call limit — progress kept. Type ", s.agent.MaxIter))+
 			bold("continue")+grey(" to resume, or redirect it. (Raise the cap with -max-iter.)"))
 		return
@@ -227,6 +236,23 @@ func (s *session) runTurn(ctx context.Context, input string) {
 	}
 
 	s.history = result.Messages
+	s.persist(ctx)
+}
+
+// persist writes a JSON snapshot of the session (history, usage, cwd) to the
+// file-backed store. It is a no-op when no store is configured, and logs a
+// warning on error instead of disrupting the REPL. FileStore.Update is atomic
+// (temp + rename), so a crash mid-write leaves the previous snapshot intact.
+func (s *session) persist(ctx context.Context) {
+	if s.store == nil {
+		return
+	}
+	sess := &luft.Session{ID: s.sessionID, History: s.history}
+	_ = luft.SetState(sess, "cwd", s.cwd)
+	_ = luft.SetState(sess, "usage", s.usage)
+	if err := luft.Save(ctx, s.store, sess); err != nil {
+		fmt.Fprintf(os.Stderr, "  %s could not persist session: %v\n", yellow("⚠"), err)
+	}
 }
 
 // runCommand dispatches a slash command. Returns true if the REPL
@@ -264,6 +290,14 @@ func (s *session) runCommand(ctx context.Context, line string) bool {
 		} else {
 			fmt.Fprintln(os.Stderr, s.logPath)
 		}
+	case "session":
+		if s.store == nil {
+			fmt.Fprintln(os.Stderr, "(persistence disabled this run)")
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "  %s %s\n", grey(padRight("id", 6)), bold(s.sessionID))
+		fmt.Fprintf(os.Stderr, "  %s %s\n", grey(padRight("file", 6)), filepath.Join(s.storeDir, s.sessionID+".json"))
+		fmt.Fprintf(os.Stderr, "  %s %s\n", grey(padRight("dir", 6)), s.cwd)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: /%s (try /help)\n", cmd)
 	}
@@ -281,6 +315,7 @@ func (s *session) printHelp() {
 		{"/tools", "list the tools currently available to the agent"},
 		{"/model <id>", "switch the main-agent model (e.g. anthropic/claude-opus-4.7)"},
 		{"/log", "print the active JSONL log path (if any)"},
+		{"/session", "print the current session ID and its on-disk location"},
 	}
 	for _, r := range rows {
 		fmt.Fprintf(os.Stderr, "  %s  %s\n", cyan(padRight(r[0], 24)), grey(r[1]))
