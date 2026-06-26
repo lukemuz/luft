@@ -52,6 +52,7 @@
 //	-no-fetch       disable the native web_fetch tool
 //	-no-search      disable the OpenRouter web_search provider tool
 //	-bash           bash safety mode: restricted | standard | unrestricted
+//	-shell          shell for bash commands (default: auto-detect; env: LUFT_SHELL)
 //	-yes            auto-approve every confirmation prompt
 //	-max-iter       max model calls per turn (default 30)
 //	-context-budget token budget before automatic summarization (default 750000)
@@ -226,6 +227,7 @@ func main() {
 	noFetch := flag.Bool("no-fetch", false, "disable the native web_fetch tool")
 	noSearch := flag.Bool("no-search", false, "disable the OpenRouter web_search provider tool")
 	bashMode := flag.String("bash", "restricted", "bash safety mode: restricted | standard | unrestricted")
+	shell := flag.String("shell", envOr("LUFT_SHELL", ""), "shell used to run bash commands (default: auto-detect /bin/sh, then sh/bash on PATH; env: LUFT_SHELL)")
 	autoYes := flag.Bool("yes", false, "auto-approve every confirmation prompt")
 	maxIter := flag.Int("max-iter", 30, "max model calls per turn")
 	contextBudget := flag.Int("context-budget", envOrInt("LUFT_CONTEXT_BUDGET", 750_000), "token budget before automatic in-loop summarization (env: LUFT_CONTEXT_BUDGET)")
@@ -322,7 +324,7 @@ func main() {
 
 	// Restricted bash for subagents: read-only commands only, no
 	// confirmation needed.
-	subBashTool, err := bash.New(bash.Config{Root: *dir, Mode: bash.ModeRestricted})
+	subBashTool, err := bash.New(bash.Config{Root: *dir, Mode: bash.ModeRestricted, Shell: *shell})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -418,7 +420,10 @@ func main() {
 
 	// --- main-agent edit tools ---------------------------------------------
 
-	mainBashTool, err := bash.New(bash.Config{Root: *dir, Mode: mode})
+	// ReportExitError: a failed command (non-zero exit or timeout) comes back
+	// as a tool error, so the CLI shows it failed and the model can't mistake
+	// it for success — the failure mode that sends the agent into a retry loop.
+	mainBashTool, err := bash.New(bash.Config{Root: *dir, Mode: mode, ReportExitError: true, Shell: *shell})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -534,7 +539,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "  %s %s\n", boldCyan("▍luft"), grey("— a fast, economical CLI coding agent"))
 	fmt.Fprintln(os.Stderr)
 	row("model", bold(*model))
-	row("bash", *bashMode)
+	row("bash", fmt.Sprintf("%s %s", *bashMode, grey(mainBashTool.Shell())))
 	row("subagents", subStatus)
 	if !*noSubagents {
 		// The three shared tiers, then each subagent's default tier (the
