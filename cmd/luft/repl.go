@@ -37,6 +37,8 @@ type session struct {
 	sessionID string            // stable ID for this REPL process
 	storeDir  string            // absolute dir the FileStore roots at (for /session)
 	cwd       string            // absolute working dir (for State["cwd"])
+
+	mcpServers []mcpServerInfo // connected MCP servers + their tools (for /mcp)
 }
 
 func (s *session) repl(ctx context.Context) {
@@ -282,6 +284,8 @@ func (s *session) runCommand(ctx context.Context, line string) bool {
 		s.printMemory()
 	case "tools":
 		s.printTools()
+	case "mcp":
+		s.printMCP()
 	case "model":
 		s.changeModel(args)
 	case "log":
@@ -313,6 +317,7 @@ func (s *session) printHelp() {
 		{"/tokens", "print accumulated token usage and cache stats"},
 		{"/memory", "print the loaded project memory (AGENTS.md / CLAUDE.md)"},
 		{"/tools", "list the tools currently available to the agent"},
+		{"/mcp", "list connected MCP servers and their tools"},
 		{"/model <id>", "switch the main-agent model (e.g. anthropic/claude-opus-4.7)"},
 		{"/log", "print the active JSONL log path (if any)"},
 		{"/session", "print the current session ID and its on-disk location"},
@@ -394,6 +399,25 @@ func (s *session) printTools() {
 			flag = " " + yellow("[confirm]")
 		}
 		fmt.Fprintf(os.Stderr, "  %s%s\n", cyan(b.Tool.Name), flag)
+	}
+}
+
+func (s *session) printMCP() {
+	if len(s.mcpServers) == 0 {
+		fmt.Fprintln(os.Stderr, "(no MCP servers connected — start with -mcp <path> or .mcp.json)")
+		return
+	}
+	for _, srv := range s.mcpServers {
+		fmt.Fprintf(os.Stderr, "  %s %s\n", bold(srv.Name), grey(fmt.Sprintf("(%d tools)", len(srv.Tools))))
+		for _, t := range srv.Tools {
+			desc := oneLine(t.Description)
+			if desc == "" {
+				desc = dim("(no description)")
+			} else {
+				desc = grey(truncate(desc, 100))
+			}
+			fmt.Fprintf(os.Stderr, "    %s  %s\n", cyan(t.Name), desc)
+		}
 	}
 }
 

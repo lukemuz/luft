@@ -50,6 +50,7 @@
 //	-model-ultrafast ultrafast subagent tier (default openai/gpt-oss-120b:nitro)
 //	-no-subagents    disable all subagent tools (explore, plan, implement)
 //	-no-implement    disable only the implement subagent
+//	-mcp            path to an MCP server config file (default: ./.mcp.json then ~/.config/luft/mcp.json)
 //	-no-fetch       disable the native web_fetch tool
 //	-no-search      disable the OpenRouter web_search provider tool
 //	-bash           bash safety mode: restricted | standard | unrestricted
@@ -68,6 +69,7 @@
 //	:reset                 clear conversation history
 //	:tokens                print accumulated token usage
 //	:session               print the current session ID and its on-disk location
+//	:mcp                   list connected MCP servers and their tools
 //	:help                  show this list
 package main
 
@@ -238,6 +240,7 @@ func main() {
 	contextBudget := flag.Int("context-budget", envOrInt("LUFT_CONTEXT_BUDGET", 750_000), "token budget before automatic in-loop summarization (env: LUFT_CONTEXT_BUDGET)")
 	resultBudget := flag.Int("result-budget", envOrInt("LUFT_RESULT_BUDGET", 12_000), "byte threshold above which noisy bash output is summarized; 0 disables (env: LUFT_RESULT_BUDGET)")
 	logPath := flag.String("log", "", "JSONL session log path. Pass `auto` to write under ~/.config/luft/sessions/")
+	mcpCfg := flag.String("mcp", "", "path to an MCP server config file (default: ./.mcp.json then ~/.config/luft/mcp.json)")
 	resumeID := flag.String("resume", "", "resume a specific session by ID")
 	continueLast := flag.Bool("continue", false, "resume the most recent session for the current working directory")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -469,6 +472,31 @@ func main() {
 	)
 	editTools := luft.MustJoin(bashTools, editorTools)
 
+	// --- MCP servers (main agent only) -------------------------------------
+	//
+	// External stdio MCP servers, loaded from -mcp or the default config
+	// locations. Tools are joined into the MAIN agent only — subagents do
+	// not get them, since a subagent runs autonomously and can't present an
+	// interactive confirmation prompt. Each tool is wrapped to require
+	// confirmation (same confirmer as edits/bash). Servers that fail to
+	// connect are warned and skipped; a missing config leaves MCP off.
+	mcpPath, err := resolveMCPConfigPath(*mcpCfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	mcpCfgLoaded, err := loadMCPConfig(mcpPath)
+	if err != nil {
+		// A malformed config shouldn't crash startup, but it must be visible —
+		// silently disabling MCP on a parse error hides the user's mistake.
+		fmt.Fprintf(os.Stderr, "  %s %v — MCP disabled for this run\n", yellow("⚠"), err)
+	}
+	mcpTools, mcpServers, mcpConns := connectMCP(ctx, mcpCfgLoaded, confirm, logger, os.Stderr)
+	defer func() {
+		for _, c := range mcpConns {
+			_ = c.Close()
+		}
+	}()
+
 	// --- implement subagent ------------------------------------------------
 
 	// A clone of the main agent that carries one well-scoped change to
@@ -509,15 +537,37 @@ func main() {
 	// their own contexts and must not share this cache.
 	mainReadTools := roTools.Wrap(dedupReads(512))
 
-	mainTools := luft.MustJoin(
+	// Join with the non-panicking Join so a misconfigured MCP server (or a
+	// tool name colliding with a built-in) produces a warning instead of a
+	// crash; the duplicate is dropped and the first definition wins.
+	mainTools, err := luft.Join(
 		mainReadTools,
 		luft.Tools(roBatchBinding),
 		editTools,
+		mcpTools,
 		todo.New().Toolset(),
 		webTools,
 		luft.Tools(subagentBindings...),
-	).CacheLast(luft.Ephemeral()). // cache the entire tool block — stable per session
-					WithProviderTools(searchTools...)
+	)
+	if err != nil {
+		// An MCP tool collided with a built-in name. Strip MCP tools and try
+		// again so a broken server config can never block startup.
+		fmt.Fprintf(os.Stderr, "  %s dropping MCP tools: %v\n", yellow("⚠"), err)
+		mainTools, err = luft.Join(
+			mainReadTools,
+			luft.Tools(roBatchBinding),
+			editTools,
+			todo.New().Toolset(),
+			webTools,
+			luft.Tools(subagentBindings...),
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+		mcpServers = nil
+	}
+	mainTools = mainTools.CacheLast(luft.Ephemeral()).
+		WithProviderTools(searchTools...)
 
 	agent := luft.Agent{
 		Client: mainClient,
@@ -601,6 +651,15 @@ func main() {
 		compressStatus = fmt.Sprintf("%s %s", green("on"), grey(fmt.Sprintf("(>%d B)", *resultBudget)))
 	}
 	row("compress", compressStatus)
+	if len(mcpServers) == 0 {
+		row("mcp", dim("off"))
+	} else {
+		parts := make([]string, 0, len(mcpServers))
+		for _, s := range mcpServers {
+			parts = append(parts, fmt.Sprintf("%s %s", bold(s.Name), grey(fmt.Sprintf("(%d tools)", len(s.Tools)))))
+		}
+		row("mcp", strings.Join(parts, grey(", ")))
+	}
 	approveStatus := grey("prompt") + grey(" (y/a/A per call)")
 	if *autoYes {
 		approveStatus = yellow("auto") + grey(" (-yes: every call approved)")
@@ -628,6 +687,8 @@ func main() {
 		sessionID: sessionID,
 		storeDir:  storeDir,
 		cwd:       abs,
+
+		mcpServers: mcpServers,
 	}
 	if loaded != nil {
 		s.history = loaded.History
