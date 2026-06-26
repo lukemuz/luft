@@ -35,18 +35,29 @@ func (s *session) repl(ctx context.Context) {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
+	// Enable bracketed paste so a multi-line paste arrives as one block
+	// (the terminal wraps it in ESC[200~ … ESC[201~) instead of fragmenting
+	// into one turn per line. Only on a real terminal; restore on exit.
+	if isTTY(os.Stdin) {
+		fmt.Fprint(os.Stderr, "\x1b[?2004h")
+		defer fmt.Fprint(os.Stderr, "\x1b[?2004l")
+	}
+
 	for {
 		fmt.Fprint(os.Stderr, "\n"+boldCyan("❯")+" ")
-		if !scanner.Scan() {
+		raw, ok := readInput(scanner)
+		if !ok {
 			fmt.Fprintln(os.Stderr)
 			return
 		}
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
 		}
 
-		if strings.HasPrefix(line, "/") || strings.HasPrefix(line, ":") {
+		// Slash/colon commands are single-line by nature; a multi-line paste
+		// is always a turn, never a command.
+		if !strings.ContainsRune(line, '\n') && (strings.HasPrefix(line, "/") || strings.HasPrefix(line, ":")) {
 			if quit := s.runCommand(ctx, line); quit {
 				return
 			}
@@ -55,6 +66,51 @@ func (s *session) repl(ctx context.Context) {
 
 		s.runTurn(ctx, line)
 	}
+}
+
+// Bracketed-paste markers. A paste-aware terminal brackets pasted text with
+// these so an application can tell a paste from typing.
+const (
+	pasteStart = "\x1b[200~"
+	pasteEnd   = "\x1b[201~"
+)
+
+// readInput returns the next logical unit of user input. A bracketed-paste
+// block is assembled into a single string with its internal newlines preserved
+// (so a multi-line paste becomes one turn), including any text typed before or
+// after the paste on the same line. Ordinary typed input carries no markers and
+// is returned line by line as before. Returns ok=false at EOF.
+func readInput(scanner *bufio.Scanner) (string, bool) {
+	if !scanner.Scan() {
+		return "", false
+	}
+	line := scanner.Text()
+	start := strings.Index(line, pasteStart)
+	if start < 0 {
+		return line, true
+	}
+
+	var b strings.Builder
+	b.WriteString(line[:start]) // text typed before the paste, if any
+	rest := line[start+len(pasteStart):]
+	for {
+		if end := strings.Index(rest, pasteEnd); end >= 0 {
+			b.WriteString(rest[:end])
+			b.WriteString(rest[end+len(pasteEnd):]) // text after the paste, if any
+			break
+		}
+		b.WriteString(rest)
+		if !scanner.Scan() {
+			break // EOF mid-paste: take what we have
+		}
+		b.WriteByte('\n')
+		rest = scanner.Text()
+	}
+	// Some terminals separate pasted lines with a bare CR; normalise so the
+	// assembled block has consistent \n breaks.
+	out := strings.ReplaceAll(b.String(), "\r\n", "\n")
+	out = strings.ReplaceAll(out, "\r", "\n")
+	return out, true
 }
 
 func (s *session) runTurn(ctx context.Context, input string) {
