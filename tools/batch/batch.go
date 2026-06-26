@@ -24,6 +24,7 @@
 package batch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -94,11 +95,59 @@ func New(cfg Config) luft.ToolBinding {
 	return luft.ToolBinding{Tool: t, Func: fn}
 }
 
+type batchCall struct {
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
 type batchInput struct {
-	Calls []struct {
-		Name  string          `json:"name"`
-		Input json.RawMessage `json:"input"`
-	} `json:"calls"`
+	Calls []batchCall `json:"calls"`
+}
+
+// UnmarshalJSON tolerates models that double-encode the arguments as JSON
+// strings — "calls" sent as a quoted string of the array, and/or each "input"
+// sent as a quoted string of the object — instead of nested JSON. It unwraps
+// one layer of string-encoding wherever it finds it so a common model quirk
+// doesn't fail the entire batch. Well-formed nested JSON is passed through
+// untouched.
+func (b *batchInput) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Calls json.RawMessage `json:"calls"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(raw.Calls)) == 0 {
+		return nil // leave Calls nil; the handler reports the empty case
+	}
+	var calls []batchCall
+	if err := json.Unmarshal(unwrapJSONString(raw.Calls), &calls); err != nil {
+		return err
+	}
+	for i := range calls {
+		calls[i].Input = unwrapJSONString(calls[i].Input)
+	}
+	b.Calls = calls
+	return nil
+}
+
+// unwrapJSONString unwraps one layer of JSON string-encoding: if raw is a JSON
+// string whose decoded contents are themselves a JSON object or array, the
+// inner JSON is returned; otherwise raw is returned unchanged. This rescues an
+// argument a model double-encoded as a string without disturbing valid input.
+func unwrapJSONString(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '"' {
+		return raw
+	}
+	var s string
+	if err := json.Unmarshal(trimmed, &s); err != nil {
+		return raw
+	}
+	if inner := bytes.TrimSpace([]byte(s)); len(inner) > 0 && (inner[0] == '{' || inner[0] == '[') {
+		return json.RawMessage(inner)
+	}
+	return raw
 }
 
 type subResult struct {

@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/lukemuz/luft"
+	"github.com/lukemuz/luft/stores"
 )
 
 // session is the mutable state owned by the REPL. It bundles the
@@ -29,24 +31,45 @@ type session struct {
 	history []luft.Message
 	usage   luft.Usage // accumulated across the session
 	logPath string     // empty if no JSONL log is active
+
+	// persistence + resume
+	store     *stores.FileStore // nil when the store dir couldn't be opened (degraded)
+	sessionID string            // stable ID for this REPL process
+	storeDir  string            // absolute dir the FileStore roots at (for /session)
+	cwd       string            // absolute working dir (for State["cwd"])
+
+	mcpServers []mcpServerInfo // connected MCP servers + their tools (for /mcp)
+
+	undo *undoStack // in-memory per-turn editor-edit checkpoint stack for /undo
 }
 
 func (s *session) repl(ctx context.Context) {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
+	// Enable bracketed paste so a multi-line paste arrives as one block
+	// (the terminal wraps it in ESC[200~ … ESC[201~) instead of fragmenting
+	// into one turn per line. Only on a real terminal; restore on exit.
+	if isTTY(os.Stdin) {
+		fmt.Fprint(os.Stderr, "\x1b[?2004h")
+		defer fmt.Fprint(os.Stderr, "\x1b[?2004l")
+	}
+
 	for {
 		fmt.Fprint(os.Stderr, "\n"+boldCyan("❯")+" ")
-		if !scanner.Scan() {
+		raw, ok := readInput(scanner)
+		if !ok {
 			fmt.Fprintln(os.Stderr)
 			return
 		}
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
 		}
 
-		if strings.HasPrefix(line, "/") || strings.HasPrefix(line, ":") {
+		// Slash/colon commands are single-line by nature; a multi-line paste
+		// is always a turn, never a command.
+		if !strings.ContainsRune(line, '\n') && (strings.HasPrefix(line, "/") || strings.HasPrefix(line, ":")) {
 			if quit := s.runCommand(ctx, line); quit {
 				return
 			}
@@ -57,7 +80,57 @@ func (s *session) repl(ctx context.Context) {
 	}
 }
 
+// Bracketed-paste markers. A paste-aware terminal brackets pasted text with
+// these so an application can tell a paste from typing.
+const (
+	pasteStart = "\x1b[200~"
+	pasteEnd   = "\x1b[201~"
+)
+
+// readInput returns the next logical unit of user input. A bracketed-paste
+// block is assembled into a single string with its internal newlines preserved
+// (so a multi-line paste becomes one turn), including any text typed before or
+// after the paste on the same line. Ordinary typed input carries no markers and
+// is returned line by line as before. Returns ok=false at EOF.
+func readInput(scanner *bufio.Scanner) (string, bool) {
+	if !scanner.Scan() {
+		return "", false
+	}
+	line := scanner.Text()
+	start := strings.Index(line, pasteStart)
+	if start < 0 {
+		return line, true
+	}
+
+	var b strings.Builder
+	b.WriteString(line[:start]) // text typed before the paste, if any
+	rest := line[start+len(pasteStart):]
+	for {
+		if end := strings.Index(rest, pasteEnd); end >= 0 {
+			b.WriteString(rest[:end])
+			b.WriteString(rest[end+len(pasteEnd):]) // text after the paste, if any
+			break
+		}
+		b.WriteString(rest)
+		if !scanner.Scan() {
+			break // EOF mid-paste: take what we have
+		}
+		b.WriteByte('\n')
+		rest = scanner.Text()
+	}
+	// Some terminals separate pasted lines with a bare CR; normalise so the
+	// assembled block has consistent \n breaks.
+	out := strings.ReplaceAll(b.String(), "\r\n", "\n")
+	out = strings.ReplaceAll(out, "\r", "\n")
+	return out, true
+}
+
 func (s *session) runTurn(ctx context.Context, input string) {
+	if s.undo != nil {
+		s.undo.beginTurn()
+		defer s.undo.endTurn()
+	}
+
 	s.history = append(s.history, luft.NewUserMessage(input))
 
 	turnCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT)
@@ -158,6 +231,7 @@ func (s *session) runTurn(ctx context.Context, input string) {
 		// ends on a clean tool-result boundary, so keep the whole turn: the
 		// user can type "continue" to resume instead of losing all the work.
 		s.history = result.Messages
+		s.persist(ctx)
 		fmt.Fprintln(os.Stderr, yellow("⚠ paused")+grey(fmt.Sprintf(" at the %d model-call limit — progress kept. Type ", s.agent.MaxIter))+
 			bold("continue")+grey(" to resume, or redirect it. (Raise the cap with -max-iter.)"))
 		return
@@ -171,6 +245,23 @@ func (s *session) runTurn(ctx context.Context, input string) {
 	}
 
 	s.history = result.Messages
+	s.persist(ctx)
+}
+
+// persist writes a JSON snapshot of the session (history, usage, cwd) to the
+// file-backed store. It is a no-op when no store is configured, and logs a
+// warning on error instead of disrupting the REPL. FileStore.Update is atomic
+// (temp + rename), so a crash mid-write leaves the previous snapshot intact.
+func (s *session) persist(ctx context.Context) {
+	if s.store == nil {
+		return
+	}
+	sess := &luft.Session{ID: s.sessionID, History: s.history}
+	_ = luft.SetState(sess, "cwd", s.cwd)
+	_ = luft.SetState(sess, "usage", s.usage)
+	if err := luft.Save(ctx, s.store, sess); err != nil {
+		fmt.Fprintf(os.Stderr, "  %s could not persist session: %v\n", yellow("⚠"), err)
+	}
 }
 
 // runCommand dispatches a slash command. Returns true if the REPL
@@ -200,6 +291,8 @@ func (s *session) runCommand(ctx context.Context, line string) bool {
 		s.printMemory()
 	case "tools":
 		s.printTools()
+	case "mcp":
+		s.printMCP()
 	case "model":
 		s.changeModel(args)
 	case "log":
@@ -208,6 +301,25 @@ func (s *session) runCommand(ctx context.Context, line string) bool {
 		} else {
 			fmt.Fprintln(os.Stderr, s.logPath)
 		}
+	case "session":
+		if s.store == nil {
+			fmt.Fprintln(os.Stderr, "(persistence disabled this run)")
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "  %s %s\n", grey(padRight("id", 6)), bold(s.sessionID))
+		fmt.Fprintf(os.Stderr, "  %s %s\n", grey(padRight("file", 6)), filepath.Join(s.storeDir, s.sessionID+".json"))
+		fmt.Fprintf(os.Stderr, "  %s %s\n", grey(padRight("dir", 6)), s.cwd)
+	case "undo":
+		if s.undo == nil {
+			fmt.Fprintln(os.Stderr, "(undo unavailable this run)")
+			return false
+		}
+		restored, skipped, nothing, msg := s.undo.undo()
+		if nothing {
+			fmt.Fprintln(os.Stderr, msg)
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "%s %s (reverted %d, skipped %d)\n", green("↩ undo"), msg, restored, skipped)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: /%s (try /help)\n", cmd)
 	}
@@ -219,12 +331,15 @@ func (s *session) printHelp() {
 		{"/help", "show this list"},
 		{"/exit | /quit", "leave"},
 		{"/reset | /clear", "clear conversation history"},
+		{"/undo", "revert this turn's editor-made file edits (editor tools only; not bash)"},
 		{"/compact [instructions]", "summarize older turns to free context (cache-resetting)"},
 		{"/tokens", "print accumulated token usage and cache stats"},
 		{"/memory", "print the loaded project memory (AGENTS.md / CLAUDE.md)"},
 		{"/tools", "list the tools currently available to the agent"},
+		{"/mcp", "list connected MCP servers and their tools"},
 		{"/model <id>", "switch the main-agent model (e.g. anthropic/claude-opus-4.7)"},
 		{"/log", "print the active JSONL log path (if any)"},
+		{"/session", "print the current session ID and its on-disk location"},
 	}
 	for _, r := range rows {
 		fmt.Fprintf(os.Stderr, "  %s  %s\n", cyan(padRight(r[0], 24)), grey(r[1]))
@@ -303,6 +418,25 @@ func (s *session) printTools() {
 			flag = " " + yellow("[confirm]")
 		}
 		fmt.Fprintf(os.Stderr, "  %s%s\n", cyan(b.Tool.Name), flag)
+	}
+}
+
+func (s *session) printMCP() {
+	if len(s.mcpServers) == 0 {
+		fmt.Fprintln(os.Stderr, "(no MCP servers connected — start with -mcp <path> or .mcp.json)")
+		return
+	}
+	for _, srv := range s.mcpServers {
+		fmt.Fprintf(os.Stderr, "  %s %s\n", bold(srv.Name), grey(fmt.Sprintf("(%d tools)", len(srv.Tools))))
+		for _, t := range srv.Tools {
+			desc := oneLine(t.Description)
+			if desc == "" {
+				desc = dim("(no description)")
+			} else {
+				desc = grey(truncate(desc, 100))
+			}
+			fmt.Fprintf(os.Stderr, "    %s  %s\n", cyan(t.Name), desc)
+		}
 	}
 }
 

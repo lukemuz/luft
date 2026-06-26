@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -241,7 +242,7 @@ func (t *Tool) buildBinding() luft.ToolBinding {
 func bashDescription(mode Mode, timeout time.Duration) string {
 	switch mode {
 	case ModeRestricted:
-		return fmt.Sprintf("Run a read-only shell command (%s timeout). Allowed: ls, cat, grep, rg, find, git status/diff/log, go list/vet, wc, head, tail, etc. Returns combined stdout+stderr.", timeout)
+		return fmt.Sprintf("Run a read-only shell command (%s timeout). Allowed: ls, cat, grep, rg, find, git status/diff/log, go list/vet, wc, head, tail, etc. Pipes between allowed commands work (e.g. `go test ./... | tail`); chaining (`;`, `&&`), redirects (`>`, `<`), and command substitution do not — to run in a subdirectory pass the `cwd` argument instead of `cd`. Returns combined stdout+stderr.", timeout)
 	case ModeStandard:
 		return fmt.Sprintf("Run a shell command via /bin/sh -c (%s timeout). Combined stdout+stderr is returned. A small deny-list rejects obviously dangerous patterns (rm -rf /, sudo, curl|sh, etc.).", timeout)
 	case ModeUnrestricted:
@@ -315,16 +316,23 @@ func (t *Tool) run(ctx context.Context, in bashInput) (string, error) {
 func (t *Tool) check(cmd string) error {
 	switch t.cfg.Mode {
 	case ModeRestricted:
-		first := firstToken(cmd)
-		if first == "" {
-			return fmt.Errorf("could not parse command")
+		// Redirects, command substitution, chaining (;, &&), and backgrounding
+		// can write files or smuggle in a second command, so they stay rejected.
+		// Pipes are the exception: a pipeline of allowlisted read-only commands
+		// is still read-only, and `… | head`/`| tail`/`| grep` is muscle memory
+		// the model reaches for constantly. Allow it, but require EVERY stage to
+		// be on the allowlist.
+		if strings.ContainsAny(cmd, ";&`$") || strings.Contains(cmd, ">") || strings.Contains(cmd, "<") {
+			return fmt.Errorf("shell metacharacters (;&`$<>) are not permitted in restricted mode; pipes between allowed commands are ok, and use the cwd argument instead of cd")
 		}
-		if _, ok := t.allow[first]; !ok {
-			return fmt.Errorf("command %q is not on the read-only allowlist (%s)", first, allowlistFirstTok)
-		}
-		// Reject shell metacharacters that smuggle in second commands.
-		if strings.ContainsAny(cmd, ";&|`$") || strings.Contains(cmd, ">") || strings.Contains(cmd, "<") {
-			return fmt.Errorf("shell metacharacters (;&|`$<>) are not permitted in restricted mode")
+		for _, seg := range strings.Split(cmd, "|") {
+			first := firstToken(seg)
+			if first == "" {
+				return fmt.Errorf("could not parse command segment %q (%s)", strings.TrimSpace(seg), allowlistFirstTok)
+			}
+			if _, ok := t.allow[first]; !ok {
+				return fmt.Errorf("command %q is not on the read-only allowlist (%s)", first, allowlistFirstTok)
+			}
 		}
 		return nil
 	case ModeStandard:
@@ -365,9 +373,22 @@ func (t *Tool) resolveCwd(cwd string) (string, error) {
 // otherwise it tries /bin/sh, then `sh`/`bash` on PATH, then $SHELL, so hosts
 // without /bin/sh still work. Falls back to /bin/sh if nothing is found, so
 // run() reports a precise "no such file" rather than failing silently.
+//
+// On Windows there is one extra wrinkle: `bash` on PATH is almost always
+// C:\Windows\System32\bash.exe, the WSL launcher, which fails outright when no
+// distro is installed (execvpe(/bin/bash) failed). Since this tool runs POSIX
+// commands via `<shell> -c`, we look for a real Git-for-Windows bash first and
+// only fall back to the PATH lookup (WSL) if none is found.
 func resolveShell(configured string) string {
 	if configured != "" {
 		return configured
+	}
+	if runtime.GOOS == "windows" {
+		for _, p := range windowsShellCandidates() {
+			if isExecutableFile(p) {
+				return p
+			}
+		}
 	}
 	if isExecutableFile(defaultShell) {
 		return defaultShell
@@ -381,6 +402,33 @@ func resolveShell(configured string) string {
 		return sh
 	}
 	return defaultShell
+}
+
+// windowsShellCandidates returns the well-known Git-for-Windows bash paths, in
+// preference order, so resolveShell can pick a working POSIX shell before
+// falling back to the WSL launcher that `bash` resolves to on PATH.
+func windowsShellCandidates() []string {
+	var out []string
+	seen := map[string]struct{}{}
+	add := func(base string) {
+		if base == "" {
+			return
+		}
+		for _, rel := range [][]string{{"Git", "bin", "bash.exe"}, {"Git", "usr", "bin", "bash.exe"}} {
+			p := filepath.Join(append([]string{base}, rel...)...)
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	add(os.Getenv("ProgramFiles"))
+	add(os.Getenv("ProgramW6432"))
+	add(os.Getenv("ProgramFiles(x86)"))
+	add(`C:\Program Files`)
+	add(`C:\Program Files (x86)`)
+	return out
 }
 
 func isExecutableFile(path string) bool {

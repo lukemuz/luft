@@ -300,18 +300,41 @@ func (e *Editor) strReplace(in editorInput) (string, error) {
 		return "", fmt.Errorf("str_replace: %w", err)
 	}
 	text := string(data)
-	count := strings.Count(text, in.OldStr)
+	oldStr, newStr := reconcileNewlines(text, in.OldStr, in.NewStr)
+	count := strings.Count(text, oldStr)
 	if count == 0 {
 		return "", fmt.Errorf("str_replace: old_str not found in %q", in.Path)
 	}
 	if count > 1 {
 		return "", fmt.Errorf("str_replace: old_str matches %d times in %q; make it unique by adding context", count, in.Path)
 	}
-	updated := strings.Replace(text, in.OldStr, in.NewStr, 1)
+	updated := strings.Replace(text, oldStr, newStr, 1)
 	if err := os.WriteFile(abs, []byte(updated), info.Mode().Perm()); err != nil {
 		return "", fmt.Errorf("str_replace: %w", err)
 	}
 	return fmt.Sprintf("edited %s (1 replacement)", e.relPath(abs)), nil
+}
+
+// reconcileNewlines adapts old_str/new_str to the file's newline convention so
+// a multi-line edit doesn't spuriously fail on line-ending mismatch. Models and
+// JSON tool arguments routinely use LF even when the on-disk file is CRLF (the
+// norm on Windows), so an otherwise-correct multi-line old_str won't be found
+// verbatim. If old_str already matches, both strings are returned untouched;
+// otherwise both are translated to the file's dominant newline (CRLF if the
+// file contains any, else LF), which makes the edit land and preserves the
+// file's existing convention on write.
+func reconcileNewlines(text, oldStr, newStr string) (string, string) {
+	if strings.Contains(text, oldStr) {
+		return oldStr, newStr
+	}
+	conv := func(s string) string {
+		s = strings.ReplaceAll(s, "\r\n", "\n")
+		if strings.Contains(text, "\r\n") {
+			s = strings.ReplaceAll(s, "\n", "\r\n")
+		}
+		return s
+	}
+	return conv(oldStr), conv(newStr)
 }
 
 func (e *Editor) create(in editorInput) (string, error) {
@@ -405,14 +428,15 @@ func (e *Editor) multiEdit(in multiEditInput) (string, error) {
 		if ed.OldStr == "" {
 			return "", fmt.Errorf("multi_edit: edit %d: old_str is required (no edits applied)", i+1)
 		}
-		count := strings.Count(text, ed.OldStr)
+		oldStr, newStr := reconcileNewlines(text, ed.OldStr, ed.NewStr)
+		count := strings.Count(text, oldStr)
 		if count == 0 {
 			return "", fmt.Errorf("multi_edit: edit %d: old_str not found in %q (no edits applied)", i+1, in.Path)
 		}
 		if count > 1 {
 			return "", fmt.Errorf("multi_edit: edit %d: old_str matches %d times in %q; add surrounding context to make it unique (no edits applied)", i+1, count, in.Path)
 		}
-		text = strings.Replace(text, ed.OldStr, ed.NewStr, 1)
+		text = strings.Replace(text, oldStr, newStr, 1)
 	}
 	if err := os.WriteFile(abs, []byte(text), info.Mode().Perm()); err != nil {
 		return "", fmt.Errorf("multi_edit: %w", err)

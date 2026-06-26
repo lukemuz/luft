@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"strings"
@@ -8,6 +9,49 @@ import (
 	"testing"
 	"time"
 )
+
+func TestReadInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    string
+		want  string
+		wantOK bool
+	}{
+		{"plain single line", "hello\n", "hello", true},
+		{"command line", "/tokens\n", "/tokens", true},
+		{
+			"bracketed paste preserves internal newlines as one unit",
+			pasteStart + "line one\nline two\nline three" + pasteEnd + "\n",
+			"line one\nline two\nline three",
+			true,
+		},
+		{
+			"text typed before and after the paste is kept",
+			"pre " + pasteStart + "a\nb" + pasteEnd + " post\n",
+			"pre a\nb post",
+			true,
+		},
+		{
+			"bare CR line separators inside a paste are normalised",
+			pasteStart + "a\rb\rc" + pasteEnd + "\n",
+			"a\nb\nc",
+			true,
+		},
+		{"eof returns not-ok", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := bufio.NewScanner(strings.NewReader(tt.in))
+			got, ok := readInput(sc)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if got != tt.want {
+				t.Errorf("readInput() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestToolInputPreview(t *testing.T) {
 	tests := []struct {

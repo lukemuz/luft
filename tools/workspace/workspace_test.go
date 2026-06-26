@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -167,9 +168,20 @@ func TestSearchTextInvalidPattern(t *testing.T) {
 	ws := newWS(t, root)
 	dispatch := ws.Dispatch()
 	raw, _ := json.Marshal(map[string]any{"pattern": "["}) // invalid regex
-	_, err := dispatch["Grep"](context.Background(), raw)
-	if err == nil {
-		t.Fatal("want error for invalid regex, got nil")
+	out, err := dispatch["Grep"](context.Background(), raw)
+	if err != nil {
+		t.Fatalf("want literal fallback, got error: %v", err)
+	}
+	var matches []struct {
+		File string `json:"file"`
+	}
+	if err := json.Unmarshal([]byte(out), &matches); err != nil {
+		t.Fatalf("unmarshal: %v (raw: %s)", err, out)
+	}
+	// No '[' characters exist in the setup fixtures, so the literal
+	// search should match nothing — but must not error.
+	if len(matches) != 0 {
+		t.Errorf("want 0 matches for '[' in fixtures, got %d (%+v)", len(matches), matches)
 	}
 }
 
@@ -388,6 +400,12 @@ func TestEditFileTraversalRejected(t *testing.T) {
 }
 
 func TestEditFilePreservesPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows doesn't implement POSIX mode bits — Go's chmod only honors the
+		// 0200 (write) bit, so a 0600 file reports as 0666. The permission-
+		// preservation contract this test checks is meaningful only on Unix.
+		t.Skip("POSIX file modes are not supported on Windows")
+	}
 	root := t.TempDir()
 	path := filepath.Join(root, "perm.txt")
 	os.WriteFile(path, []byte("old content"), 0600)

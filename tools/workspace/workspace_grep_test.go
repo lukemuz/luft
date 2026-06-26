@@ -167,6 +167,36 @@ func TestGrepLiteralFastPath(t *testing.T) {
 	}
 }
 
+// TestGrepInvalidRegexFallsBackToLiteral — a pattern that contains
+// regex metacharacters but won't compile as a regex (e.g. "Trim("
+// with an unbalanced paren) should be searched for literally rather
+// than returning a hard error.
+func TestGrepInvalidRegexFallsBackToLiteral(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "f.go"), []byte("func foo() { strings.Trim(s, \"x\") }\nbar\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ws := newWS(t, root)
+	raw := callTool(t, ws, "Grep", map[string]string{"pattern": "Trim("})
+	if strings.HasPrefix(raw, "Error") || strings.Contains(raw, "invalid pattern") {
+		t.Fatalf("Grep returned an error for invalid-regex pattern: %s", raw)
+	}
+	var hits []struct {
+		File string
+		Line int
+		Text string
+	}
+	if err := json.Unmarshal([]byte(raw), &hits); err != nil {
+		t.Fatalf("failed to parse Grep result %q: %v", raw, err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d (%+v)", len(hits), hits)
+	}
+	if !strings.Contains(hits[0].Text, "Trim(") {
+		t.Errorf("hit text %q does not contain 'Trim('", hits[0].Text)
+	}
+}
+
 // TestGrepStableOrder verifies that with parallel workers, output is
 // still ordered (file ascending, line ascending). The model and the
 // agent loop both benefit from deterministic results.

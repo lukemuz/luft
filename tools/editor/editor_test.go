@@ -102,6 +102,31 @@ func TestMultiEditAtomicOnFailure(t *testing.T) {
 	}
 }
 
+// A CRLF file (the norm on Windows) edited with an LF multi-line old_str must
+// still match: models and JSON args use LF, so without newline reconciliation
+// every multi-line edit on such a file would spuriously fail.
+func TestStrReplaceMatchesAcrossCRLF(t *testing.T) {
+	e, dir := mkEditor(t)
+	crlf := "func Add(a, b int) int {\r\n\treturn a - b\r\n}\r\n"
+	if err := os.WriteFile(filepath.Join(dir, "c.go"), []byte(crlf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// old_str/new_str use LF, as a model would emit them.
+	if _, err := call(t, e, editorInput{
+		Command: "str_replace",
+		Path:    "c.go",
+		OldStr:  "func Add(a, b int) int {\n\treturn a - b\n}",
+		NewStr:  "func Add(a, b int) int {\n\treturn a + b\n}",
+	}); err != nil {
+		t.Fatalf("str_replace across CRLF: %v", err)
+	}
+	body, _ := os.ReadFile(filepath.Join(dir, "c.go"))
+	want := "func Add(a, b int) int {\r\n\treturn a + b\r\n}\r\n"
+	if string(body) != want {
+		t.Fatalf("CRLF convention not preserved or edit wrong:\n got %q\nwant %q", body, want)
+	}
+}
+
 func TestMultiEditRejectsNonUnique(t *testing.T) {
 	e, dir := mkEditor(t)
 	if _, err := call(t, e, editorInput{Command: "create", Path: "h.txt", FileText: "x x x"}); err != nil {

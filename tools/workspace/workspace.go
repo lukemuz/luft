@@ -299,6 +299,8 @@ func (w *Workspace) buildBindings() []luft.ToolBinding {
 		"Grep",
 		"Searches file contents for lines matching a pattern. The pattern is treated as a Go regular expression — "+
 			"plain literals (no regex metachars) take a fast non-regex path automatically. "+
+			"If a pattern contains metacharacters but fails to compile as a regex (e.g. `Trim(` with an unbalanced paren), "+
+			"it is searched for as a literal substring rather than producing an error. "+
 			"Returns matches as {file, line, text} objects, sorted by file then line. "+
 			"Skips common bloat directories (.git, node_modules, vendor, build, dist, target, .venv, __pycache__, etc.) "+
 			"and binary files (by extension and by NUL-byte sniff). "+
@@ -631,7 +633,11 @@ func compileMatcher(p string) (matcher, error) {
 	}
 	re, err := regexp.Compile(p)
 	if err != nil {
-		return nil, err
+		// A pattern that contains regex metacharacters but fails to
+		// compile (e.g. "Trim(" with an unbalanced paren) is almost
+		// always meant as a literal search. Fall back to literal
+		// matching rather than surfacing a confusing regex error.
+		return &literalMatcher{pat: []byte(p)}, nil
 	}
 	return &regexMatcher{re: re}, nil
 }
