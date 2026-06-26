@@ -449,6 +449,12 @@ func main() {
 	}
 	editorBindings := ed.Toolset().Bindings
 
+	// In-memory undo stack for /undo: the editCheckpoint middleware (innermost
+	// editor wrapper) snapshots each target file before a structured edit and
+	// pushes an undo entry on success. Both the main agent and the implement
+	// subagent share editTools, so their edits land on the same stack.
+	undoStack := newUndoStack(20)
+
 	// bash gets summarizing compression (build/test logs are the main source
 	// of oversized, noisy output); the editor does not — its output is verbatim
 	// file content the model needs intact to write correct edits.
@@ -469,6 +475,7 @@ func main() {
 		luft.WithTimeout(60*time.Second),
 		luft.WithResultLimit(64*1024),
 		luft.WithLogging(logger),
+		editCheckpoint(undoStack, *dir),
 	)
 	editTools := luft.MustJoin(bashTools, editorTools)
 
@@ -689,6 +696,7 @@ func main() {
 		cwd:       abs,
 
 		mcpServers: mcpServers,
+		undo:       undoStack,
 	}
 	if loaded != nil {
 		s.history = loaded.History

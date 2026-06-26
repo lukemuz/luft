@@ -39,6 +39,8 @@ type session struct {
 	cwd       string            // absolute working dir (for State["cwd"])
 
 	mcpServers []mcpServerInfo // connected MCP servers + their tools (for /mcp)
+
+	undo *undoStack // in-memory per-turn editor-edit checkpoint stack for /undo
 }
 
 func (s *session) repl(ctx context.Context) {
@@ -124,6 +126,11 @@ func readInput(scanner *bufio.Scanner) (string, bool) {
 }
 
 func (s *session) runTurn(ctx context.Context, input string) {
+	if s.undo != nil {
+		s.undo.beginTurn()
+		defer s.undo.endTurn()
+	}
+
 	s.history = append(s.history, luft.NewUserMessage(input))
 
 	turnCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT)
@@ -302,6 +309,17 @@ func (s *session) runCommand(ctx context.Context, line string) bool {
 		fmt.Fprintf(os.Stderr, "  %s %s\n", grey(padRight("id", 6)), bold(s.sessionID))
 		fmt.Fprintf(os.Stderr, "  %s %s\n", grey(padRight("file", 6)), filepath.Join(s.storeDir, s.sessionID+".json"))
 		fmt.Fprintf(os.Stderr, "  %s %s\n", grey(padRight("dir", 6)), s.cwd)
+	case "undo":
+		if s.undo == nil {
+			fmt.Fprintln(os.Stderr, "(undo unavailable this run)")
+			return false
+		}
+		restored, skipped, nothing, msg := s.undo.undo()
+		if nothing {
+			fmt.Fprintln(os.Stderr, msg)
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "%s %s (reverted %d, skipped %d)\n", green("↩ undo"), msg, restored, skipped)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: /%s (try /help)\n", cmd)
 	}
@@ -313,6 +331,7 @@ func (s *session) printHelp() {
 		{"/help", "show this list"},
 		{"/exit | /quit", "leave"},
 		{"/reset | /clear", "clear conversation history"},
+		{"/undo", "revert this turn's editor-made file edits (editor tools only; not bash)"},
 		{"/compact [instructions]", "summarize older turns to free context (cache-resetting)"},
 		{"/tokens", "print accumulated token usage and cache stats"},
 		{"/memory", "print the loaded project memory (AGENTS.md / CLAUDE.md)"},
