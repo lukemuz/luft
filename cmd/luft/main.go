@@ -2,7 +2,7 @@
 //
 // Topology (Phase 2):
 //
-//	main agent           (z-ai/glm-5.2 by default — configurable via -model)
+//	main agent           (z-ai/glm-5.2:nitro by default — configurable via -model)
 //	  ├── direct tools   workspace read-only + trained bash + trained editor
 //	  │                  + todo + clock + batch
 //	  ├── explore        research subagent (default tier: ultrafast) —
@@ -36,16 +36,17 @@
 // The agent is sandboxed to the current working directory by default.
 // Pass -dir to operate on a different directory.
 //
-// The main agent defaults to z-ai/glm-5.2 (-model). Subagent tiers default to
-// z-ai/glm-5.2 (powerful), x-ai/grok-4.3 (medium), and openai/gpt-oss-120b:nitro
-// (ultrafast) — any OpenRouter slug works.
+// The main agent defaults to z-ai/glm-5.2:nitro (-model). Subagent tiers default
+// to z-ai/glm-5.2:nitro (powerful), x-ai/grok-4.3:nitro (medium), and
+// openai/gpt-oss-120b:nitro (ultrafast) — any OpenRouter slug works. The :nitro
+// suffix asks OpenRouter to route to the highest-throughput provider.
 //
 // Flags:
 //
 //	-dir             working directory the agent is sandboxed to (default cwd)
-//	-model           main-agent model id (default z-ai/glm-5.2)
-//	-model-powerful  powerful subagent tier (default x-ai/grok-4.3)
-//	-model-medium    medium subagent tier (default z-ai/glm-5.2)
+//	-model           main-agent model id (default z-ai/glm-5.2:nitro)
+//	-model-powerful  powerful subagent tier (default z-ai/glm-5.2:nitro)
+//	-model-medium    medium subagent tier (default x-ai/grok-4.3:nitro)
 //	-model-ultrafast ultrafast subagent tier (default openai/gpt-oss-120b:nitro)
 //	-no-subagents    disable all subagent tools (explore, plan, implement)
 //	-no-implement    disable only the implement subagent
@@ -134,7 +135,7 @@ Two automatic context savers may alter tool results: re-issuing an identical rea
 
 1. Default to the explore subagent for breadth — code you need to understand but won't necessarily edit: repo inspection (understand a module, find all usages, audit a pattern) and well-scoped Q&A (look up a stdlib function, summarise an RFC, answer a factual question with provided context). It's cheap, its file dumps and fetches stay out of your context, and you receive only its summary. Choose explore over batch when the search is broad or open-ended and you only need the conclusion; choose batch when you need the raw file contents in your own context to act on.
 2. Read it yourself for (a) tight, surgical lookups (one file, one symbol) and (b) ANY code you are about to edit. explore's summary comes from a cheaper model: it loses detail you need to write a correct change, and you can't cheaply verify what you never saw. Delegating breadth is a good trade; delegating the reading of code you're about to modify is not.
-3. Default to batch for independent read-only work. Each tool call is a full LLM round trip, so if you'd otherwise issue 2+ reads/greps/inspections that don't depend on each other, batch them. Issue solo calls only when a later call's input depends on an earlier call's output (e.g. grep first, then read only the files it returned).
+3. Maximise parallelism — independent tool calls you issue in the SAME turn execute concurrently, and each call is a full LLM round trip, so never spread independent work across separate turns. Default to batch for independent read-only fan-out (2+ reads/greps/inspections). Beyond reads, emit independent calls together in one turn: edits to different files, or a build plus an unrelated test, should all go out at once rather than one-per-turn. Issue sequential calls only when a later call's input depends on an earlier call's output (e.g. grep first, then read only the files it returned; edit, then test it) — and when several edits target the SAME file, use multi_edit instead of concurrent str_replace calls.
 4. Call plan as a routine first step for substantive design work — non-trivial multi-file changes, interface or data-shape changes, decisions with multiple plausible tradeoffs, or stuck debugging (2+ turns without a clear hypothesis). Pass the question with the context you've gathered. Skip plan for routine single-file changes or when your approach is already clear.
 5. Delegate to implement when a change is well-scoped and independently verifiable and keeping its churn out of your context is worth it — a mechanical refactor repeated across files, or a self-contained unit you can hand off with a precise spec and a clear "done when tests pass". Do it yourself when the change is central to what you're reasoning about, depends on decisions you haven't made, or is small enough that writing the spec costs more than the edit. Either way you own the review — read implement's diff before trusting it.
 6. Brief subagents like a colleague who just walked in: state the goal, the relevant context you've already gathered (file paths, line numbers, error messages, what you've ruled out), and what shape of answer you need. Terse one-line prompts produce shallow, generic work. For multi-step tasks, call todo_write at the start and update it as you go, keeping at most one item in_progress.
@@ -150,7 +151,7 @@ Two automatic context savers may alter tool results: re-issuing an identical rea
 
 # Verifying your work
 
-13. After making edits, verify with appropriate checks: build, type-check, run affected tests via bash. Review your own changes with git diff before declaring done. Don't trust an edit you haven't checked.
+13. Batch your edits, then verify once. Make all the edits a change needs before running checks — don't build-and-test after each individual edit when the edits are part of one change. Verify with build, type-check, and the affected package's tests, scoped to what you touched (e.g. go test ./path/to/pkg/, not the whole suite unless the change spans many packages). Review your own changes with git diff before declaring done. Don't trust an edit you haven't checked.
 14. Type-checking and tests verify code correctness, not feature correctness. If you can't actually exercise the feature (a UI change you can't see, a side effect you can't observe in this environment), say so explicitly rather than claiming success.
 15. Be honest about uncertainty and about what you didn't verify. Don't claim a fix works when you've only inspected it. If the same approach has failed twice, stop and reconsider — call plan, ask the user, or name what you don't understand — rather than trying a third variation.
 
@@ -206,7 +207,7 @@ Operating principles:
 2. Stay inside the task. Make the change you were asked for and nothing more — no opportunistic refactors, no scaffolding for hypothetical futures, no backwards-compat shims for code you can just change. Three similar lines beat a premature abstraction.
 3. Write no comments unless the *why* is non-obvious (a hidden constraint, a subtle invariant, a workaround). Don't narrate *what* the code does.
 4. Watch for security issues (injection, path traversal, the OWASP top 10) and fix any you introduce immediately.
-5. Verify before you report: build, type-check, and run the affected tests via bash. Review your own diff with git diff. If you can't exercise the change in this environment, say so plainly rather than claiming success.
+5. Work in parallel, verify once: independent tool calls you issue in the same turn run concurrently (edits to different files, independent reads or checks — emit them together; use batch for read-only fan-out), and each call is a full round trip. Make all the edits a change needs before verifying rather than build-and-testing after each one. Verify with build, type-check, and the affected package's tests scoped to what you touched; review your own diff with git diff. If you can't exercise the change in this environment, say so plainly rather than claiming success.
 6. If the same approach fails twice, stop and reconsider rather than trying a third variation — report what you tried, what failed, and your current hypothesis.
 7. Act with care. Local reversible actions (edits, reads, tests, builds) are free — just do them. But do NOT take destructive or shared-state actions unless the task explicitly calls for them: deleting files/branches, dropping data, force-pushing, rewriting history, committing, pushing, or downgrading dependencies. Never use a destructive shortcut to get past a failing check (no --no-verify, no skipping hooks). If the task seems to require one of these, do the reversible work and flag the remaining step in your summary rather than performing it.
 
@@ -214,13 +215,13 @@ Your final message is the ONLY thing the orchestrator sees — your iteration hi
 
 func main() {
 	dir := flag.String("dir", ".", "working directory the agent is sandboxed to (defaults to the current directory)")
-	model := flag.String("model", envOr("LUFT_MODEL", "z-ai/glm-5.2"), "main-agent model id (any OpenRouter slug; env: LUFT_MODEL)")
+	model := flag.String("model", envOr("LUFT_MODEL", "z-ai/glm-5.2:nitro"), "main-agent model id (any OpenRouter slug; env: LUFT_MODEL)")
 	// Subagents pick from three shared model tiers; the calling model may
 	// request a tier per call (see subagent tool schemas), otherwise each
 	// subagent uses its role default (explore→ultrafast, plan→powerful,
 	// implement→medium).
-	powerfulModel := flag.String("model-powerful", envOr("LUFT_MODEL_POWERFUL", "z-ai/glm-5.2"), "powerful tier: strong reasoning model for subagents (env: LUFT_MODEL_POWERFUL)")
-	mediumModel := flag.String("model-medium", envOr("LUFT_MODEL_MEDIUM", "x-ai/grok-4.3"), "medium tier: fast, high-quality model for subagents (env: LUFT_MODEL_MEDIUM)")
+	powerfulModel := flag.String("model-powerful", envOr("LUFT_MODEL_POWERFUL", "z-ai/glm-5.2:nitro"), "powerful tier: strong reasoning model for subagents (env: LUFT_MODEL_POWERFUL)")
+	mediumModel := flag.String("model-medium", envOr("LUFT_MODEL_MEDIUM", "x-ai/grok-4.3:nitro"), "medium tier: fast, high-quality model for subagents (env: LUFT_MODEL_MEDIUM)")
 	ultrafastModel := flag.String("model-ultrafast", envOr("LUFT_MODEL_ULTRAFAST", "openai/gpt-oss-120b:nitro"), "ultrafast tier: small model at very high throughput for subagents (env: LUFT_MODEL_ULTRAFAST)")
 	noSubagents := flag.Bool("no-subagents", false, "disable all subagent tools (explore, plan, implement)")
 	noImplement := flag.Bool("no-implement", false, "disable only the implement subagent (the editing clone)")
