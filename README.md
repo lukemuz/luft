@@ -1,6 +1,6 @@
 # luft
 
-A small Go library for LLM calls, tools, and agent loops — and a CLI coding agent built on top of it.
+A Go library for LLM calls, tools, and agent loops. Also a CLI coding agent — `cmd/luft` — built entirely from the library's primitives.
 
 > Plain data. Plain functions. No framework magic.
 >
@@ -72,7 +72,16 @@ export OPENROUTER_API_KEY=sk-or-...
 cd ~/your-project && luft
 ~~~
 
-Full usage — models, flags, bash safety modes, subagents, prompt caching, and project memory — is in [`cmd/luft/README.md`](cmd/luft/README.md).
+~~~bash
+# interactive REPL
+> what's the difference between Loop and StepStream?
+
+# one-shot from the shell
+luft "what does main.go do"
+git diff main | luft -p "review this for security issues" --json | jq
+~~~
+
+Full usage — models, flags, bash safety modes, subagents, prompt caching, project memory, and the non-interactive / pipe mode — is in [`cmd/luft/README.md`](cmd/luft/README.md).
 
 ## Core building blocks
 

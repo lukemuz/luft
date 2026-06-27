@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -41,6 +42,12 @@ type session struct {
 	mcpServers []mcpServerInfo // connected MCP servers + their tools (for /mcp)
 
 	undo *undoStack // in-memory per-turn editor-edit checkpoint stack for /undo
+
+	// out/errOut are the streams the REPL and print mode write to. They
+	// default to os.Stdout/os.Stderr (set in main) and are overridable in
+	// tests so runTurn/runPrint can be asserted on without capturing real fds.
+	out    io.Writer
+	errOut io.Writer
 }
 
 func (s *session) repl(ctx context.Context) {
@@ -131,7 +138,15 @@ func (s *session) runTurn(ctx context.Context, input string) {
 		defer s.undo.endTurn()
 	}
 
-	s.history = append(s.history, luft.NewUserMessage(input))
+	expanded, images, warns := expandAtReferences(input, s.cwd)
+	for _, w := range warns {
+		fmt.Fprintln(s.errOut, yellow("⚠ ")+w)
+	}
+	if len(images) > 0 {
+		s.history = append(s.history, luft.NewUserMessageWithImages(expanded, images))
+	} else {
+		s.history = append(s.history, luft.NewUserMessage(expanded))
+	}
 
 	turnCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT)
 	defer cancel()
@@ -189,7 +204,7 @@ func (s *session) runTurn(ctx context.Context, input string) {
 			armIdle()
 			switch b.Type {
 			case luft.TypeText:
-				fmt.Print(b.Text)
+				fmt.Fprint(s.out, b.Text)
 			case luft.TypeToolUse:
 				if b.ID == "" {
 					return
@@ -205,20 +220,20 @@ func (s *session) runTurn(ctx context.Context, input string) {
 		func(results []luft.ToolResult) {
 			disarmIdle()
 			sp.Stop()
-			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(s.errOut)
 			for _, r := range results {
 				name := toolNames[r.ToolUseID]
 				if name == "" {
 					name = "tool"
 				}
 				preview := toolInputPreview(toolInputs[r.ToolUseID])
-				printToolResult(name, preview, r.IsError, len(r.Content))
+				s.printToolResult(name, preview, r.IsError, len(r.Content))
 			}
 		},
 	)
 	disarmIdle()
 	sp.Stop()
-	fmt.Println()
+	fmt.Fprintln(s.out)
 
 	// Tokens were spent regardless of how the loop ended; always account for them.
 	s.usage.InputTokens += result.Usage.InputTokens
@@ -232,12 +247,12 @@ func (s *session) runTurn(ctx context.Context, input string) {
 		// user can type "continue" to resume instead of losing all the work.
 		s.history = result.Messages
 		s.persist(ctx)
-		fmt.Fprintln(os.Stderr, yellow("⚠ paused")+grey(fmt.Sprintf(" at the %d model-call limit — progress kept. Type ", s.agent.MaxIter))+
+		fmt.Fprintln(s.errOut, yellow("⚠ paused")+grey(fmt.Sprintf(" at the %d model-call limit — progress kept. Type ", s.agent.MaxIter))+
 			bold("continue")+grey(" to resume, or redirect it. (Raise the cap with -max-iter.)"))
 		return
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, red("✗ error: ")+err.Error())
+		fmt.Fprintln(s.errOut, red("✗ error: ")+err.Error())
 		if n := len(s.history); n > 0 {
 			s.history = s.history[:n-1]
 		}
@@ -260,7 +275,7 @@ func (s *session) persist(ctx context.Context) {
 	_ = luft.SetState(sess, "cwd", s.cwd)
 	_ = luft.SetState(sess, "usage", s.usage)
 	if err := luft.Save(ctx, s.store, sess); err != nil {
-		fmt.Fprintf(os.Stderr, "  %s could not persist session: %v\n", yellow("⚠"), err)
+		fmt.Fprintf(s.errOut, "  %s could not persist session: %v\n", yellow("⚠"), err)
 	}
 }
 
@@ -457,7 +472,7 @@ func (s *session) changeModel(model string) {
 //
 //	✓ tool_name  preview…                       1.2 KiB
 //	✗ tool_name  preview…                       error
-func printToolResult(name, preview string, isError bool, contentLen int) {
+func (s *session) printToolResult(name, preview string, isError bool, contentLen int) {
 	mark := green("✓")
 	if isError {
 		mark = red("✗")
@@ -470,7 +485,7 @@ func printToolResult(name, preview string, isError bool, contentLen int) {
 	if isError {
 		right = red("error")
 	}
-	fmt.Fprintf(os.Stderr, "%s  %s\n", left, grey(right))
+	fmt.Fprintf(s.errOut, "%s  %s\n", left, grey(right))
 }
 
 // toolInputPreview returns a short, single-line preview of the most

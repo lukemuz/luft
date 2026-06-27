@@ -61,7 +61,29 @@
 //	-result-budget  byte threshold above which bash output is summarized (default 12000; 0 disables)
 //	-continue       resume the most recent session for the current working directory
 //	-resume <id>    resume a specific session by ID (mutually exclusive with -continue)
+//	-p <prompt>     non-interactive mode: run one turn with the given prompt and exit.
+//	                Also triggered by positional args ("luft explain main.go") or piped
+//	                stdin ("git diff | luft review"). When both an instruction and
+//	                piped stdin are present, the instruction is the prompt and the piped
+//	                content is appended as context. A bare "luft" on a TTY starts the
+//	                interactive REPL; a bare "luft" with piped stdin treats stdin as
+//	                the prompt.
+//	-json           non-interactive: emit one JSON object on stdout instead of
+//	                streaming text. Shape: {session_id, result, usage, tool_calls,
+//	                error, exit_code}. Pairs with -resume for multi-step scripts:
+//	                "luft -p 'step 1' --json | jq -r .session_id" then
+//	                "luft -resume <id> -p 'step 2'".
+//	-quiet          non-interactive: suppress tool-progress lines on stderr. stdout
+//	                is unaffected (streamed text or the JSON object). --json does not
+//	                imply --quiet; pipe "2>/dev/null" for total silence.
 //	-version        print version and exit
+//
+// Exit codes (non-interactive mode): 0 = success or max-iter pause (partial work
+// kept, resumable); 1 = error (API failure, tool dispatch); 2 = no prompt
+// provided; 130 = interrupted (SIGINT/SIGTERM). Confirmation prompts are
+// auto-approved in non-interactive mode (a pipe can't answer y/n). Scripts that
+// need to distinguish "completed" from "paused" should inspect the JSON
+// error field ("max-iter" vs null) rather than the exit code.
 //
 // REPL commands:
 //
@@ -243,6 +265,9 @@ func main() {
 	mcpCfg := flag.String("mcp", "", "path to an MCP server config file (default: ./.mcp.json then ~/.config/luft/mcp.json)")
 	resumeID := flag.String("resume", "", "resume a specific session by ID")
 	continueLast := flag.Bool("continue", false, "resume the most recent session for the current working directory")
+	printFlag := flag.String("p", "", "non-interactive mode: run one turn with the given prompt and exit (synonym: --print; also triggered by positional args or piped stdin)")
+	jsonOut := flag.Bool("json", false, "non-interactive: emit one JSON object on stdout instead of streaming text")
+	quiet := flag.Bool("quiet", false, "non-interactive: suppress tool-progress lines on stderr")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -253,6 +278,21 @@ func main() {
 	if *showVersion {
 		fmt.Println(version)
 		return
+	}
+
+	// Non-interactive mode is triggered by -p, positional args, or piped
+	// stdin. Computed once, up here, because it governs two things that
+	// must be decided before the agent is assembled: (1) the confirmer
+	// must auto-approve in non-interactive mode (a pipe can't answer
+	// y/n), and (2) the startup banner is skipped (it's REPL-oriented
+	// noise on stderr for scripts).
+	stdinIsTTY := isTTY(os.Stdin)
+	nonInteractive := isNonInteractive(strings.TrimSpace(*printFlag), flag.NArg(), stdinIsTTY)
+	// In non-interactive mode the instruction is the -p value, or the
+	// positional args joined by spaces when -p is unset. -p wins.
+	instruction := strings.TrimSpace(*printFlag)
+	if instruction == "" && flag.NArg() > 0 {
+		instruction = strings.Join(flag.Args(), " ")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -301,7 +341,12 @@ func main() {
 	// and the confirmer so the confirmer can suspend it while it owns the
 	// terminal for an approval prompt.
 	sp := newSpinner(os.Stderr)
-	confirm := makeConfirmer(*autoYes, sp, os.Stdin, os.Stderr)
+	// Non-interactive runs can't answer a confirmation prompt (stdin is
+	// either piped context or EOF), so force auto-approve before the
+	// confirmer closure captures autoYes. Do not move this below
+	// makeConfirmer: the closure captures autoYes by value.
+	effectiveAutoYes := *autoYes || nonInteractive
+	confirm := makeConfirmer(effectiveAutoYes, sp, os.Stdin, os.Stderr)
 
 	// Summarizer for /compact, automatic in-loop trimming, and oversized-
 	// result compression. Defaults to glm-5.2 (the main-tier model); override
@@ -628,59 +673,61 @@ func main() {
 	row := func(label, value string) {
 		fmt.Fprintf(os.Stderr, "  %s %s\n", grey(padRight(label, 10)), value)
 	}
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintf(os.Stderr, "  %s %s\n", boldCyan("▍luft"), grey("— a fast, economical CLI coding agent"))
-	fmt.Fprintln(os.Stderr)
-	row("model", bold(*model))
-	row("bash", fmt.Sprintf("%s %s", *bashMode, grey(mainBashTool.Shell())))
-	row("subagents", subStatus)
-	if !*noSubagents {
-		// The three shared tiers, then each subagent's default tier (the
-		// calling model may request a different tier per call).
-		row("powerful", *powerfulModel)
-		row("medium", *mediumModel)
-		row("ultrafast", *ultrafastModel)
-		row("explore", grey("tier ")+tierUltrafast)
-		row("plan", grey("tier ")+tierPowerful)
-		if *noImplement {
-			row("implement", dim("off"))
+	if !nonInteractive {
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintf(os.Stderr, "  %s %s\n", boldCyan("▍luft"), grey("— a fast, economical CLI coding agent"))
+		fmt.Fprintln(os.Stderr)
+		row("model", bold(*model))
+		row("bash", fmt.Sprintf("%s %s", *bashMode, grey(mainBashTool.Shell())))
+		row("subagents", subStatus)
+		if !*noSubagents {
+			// The three shared tiers, then each subagent's default tier (the
+			// calling model may request a different tier per call).
+			row("powerful", *powerfulModel)
+			row("medium", *mediumModel)
+			row("ultrafast", *ultrafastModel)
+			row("explore", grey("tier ")+tierUltrafast)
+			row("plan", grey("tier ")+tierPowerful)
+			if *noImplement {
+				row("implement", dim("off"))
+			} else {
+				row("implement", grey("tier ")+tierMedium)
+			}
+		}
+		searchStatus := green("on")
+		if *noSearch {
+			searchStatus = dim("off")
+		}
+		row("web search", searchStatus)
+		compressStatus := dim("off")
+		if *resultBudget > 0 {
+			compressStatus = fmt.Sprintf("%s %s", green("on"), grey(fmt.Sprintf("(>%d B)", *resultBudget)))
+		}
+		row("compress", compressStatus)
+		if len(mcpServers) == 0 {
+			row("mcp", dim("off"))
 		} else {
-			row("implement", grey("tier ")+tierMedium)
+			parts := make([]string, 0, len(mcpServers))
+			for _, s := range mcpServers {
+				parts = append(parts, fmt.Sprintf("%s %s", bold(s.Name), grey(fmt.Sprintf("(%d tools)", len(s.Tools)))))
+			}
+			row("mcp", strings.Join(parts, grey(", ")))
 		}
-	}
-	searchStatus := green("on")
-	if *noSearch {
-		searchStatus = dim("off")
-	}
-	row("web search", searchStatus)
-	compressStatus := dim("off")
-	if *resultBudget > 0 {
-		compressStatus = fmt.Sprintf("%s %s", green("on"), grey(fmt.Sprintf("(>%d B)", *resultBudget)))
-	}
-	row("compress", compressStatus)
-	if len(mcpServers) == 0 {
-		row("mcp", dim("off"))
-	} else {
-		parts := make([]string, 0, len(mcpServers))
-		for _, s := range mcpServers {
-			parts = append(parts, fmt.Sprintf("%s %s", bold(s.Name), grey(fmt.Sprintf("(%d tools)", len(s.Tools)))))
+		approveStatus := grey("prompt") + grey(" (y/a/A per call)")
+		if *autoYes {
+			approveStatus = yellow("auto") + grey(" (-yes: every call approved)")
 		}
-		row("mcp", strings.Join(parts, grey(", ")))
+		row("approve", approveStatus)
+		row("dir", abs)
+		if store != nil {
+			row("session", sessionID)
+		}
+		if resolvedLog != "" {
+			row("log", resolvedLog)
+		}
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, dim("  type a request, or /help for commands. ctrl-c to interrupt, ctrl-d to exit."))
 	}
-	approveStatus := grey("prompt") + grey(" (y/a/A per call)")
-	if *autoYes {
-		approveStatus = yellow("auto") + grey(" (-yes: every call approved)")
-	}
-	row("approve", approveStatus)
-	row("dir", abs)
-	if store != nil {
-		row("session", sessionID)
-	}
-	if resolvedLog != "" {
-		row("log", resolvedLog)
-	}
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, dim("  type a request, or /help for commands. ctrl-c to interrupt, ctrl-d to exit."))
 
 	s := &session{
 		agent:      agent,
@@ -697,12 +744,30 @@ func main() {
 
 		mcpServers: mcpServers,
 		undo:       undoStack,
+
+		out:    os.Stdout,
+		errOut: os.Stderr,
 	}
 	if loaded != nil {
 		s.history = loaded.History
 		if u, err := luft.GetState[luft.Usage](loaded, "usage"); err == nil {
 			s.usage = u
 		}
+	}
+	if nonInteractive {
+		// Read piped stdin before the agent runs so a stray confirmer
+		// (shouldn't fire — autoYes is forced) can't consume it. When
+		// stdin is a terminal this returns "".
+		stdin := readStdin(os.Stdin, stdinIsTTY)
+		prompt, err := assemblePrompt(instruction, stdin)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, red("✗ ")+err.Error())
+			cleanup(logFile, toClosers(mcpConns))
+			os.Exit(2)
+		}
+		code := s.runPrint(ctx, prompt, printOpts{json: *jsonOut, quiet: *quiet})
+		cleanup(logFile, toClosers(mcpConns))
+		os.Exit(code)
 	}
 	s.repl(ctx)
 }
