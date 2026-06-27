@@ -165,6 +165,9 @@ A good `AGENTS.md` is short and concrete: project conventions, how to run tests,
 | `-log` | (off) | JSONL session log path. Use `-log auto` to write under `~/.config/luft/sessions/<timestamp>.jsonl`, or pass an explicit path. |
 | `-continue` | false | Resume the most recent persisted session for the current working directory |
 | `-resume <id>` | (off) | Resume a specific session by ID (mutually exclusive with `-continue`) |
+| `-p <prompt>` | (off) | Non-interactive mode: run one turn with this prompt and exit. Also triggered by positional args or piped stdin. |
+| `--json` | false | Non-interactive: emit one JSON object on stdout instead of streaming text |
+| `--quiet` | false | Non-interactive: suppress tool-progress lines on stderr |
 
 ### Bash safety modes
 
@@ -248,6 +251,57 @@ The main agent plans via `todo_write`, uses `str_replace_based_edit_tool` for ed
 ```
 The main agent should call `plan` to delegate the design, then summarise back.
 
+## Non-interactive / pipe mode
+
+`luft` runs one-shot instead of entering the REPL when you pass `-p`, give positional args, or pipe stdin. It streams the assistant's text to stdout and writes tool progress / errors to stderr — so it composes with `less`, `grep`, `jq`, and friends.
+
+```bash
+# positional arg → one turn, streamed to stdout
+luft "what does main.go do"
+
+# -p is the explicit form
+luft -p "review main.go for security issues"
+
+# pipe context in; the instruction is the prompt, the piped content is context
+git diff main | luft "review this diff for bugs"
+tail -200 app.log | luft "summarise the anomalies"
+
+# pipe with no instruction → stdin is the prompt
+echo "explain this function" | luft
+
+# --json: one JSON object on stdout, machine-readable
+luft -p "add a README section on auth" --json | jq
+
+# multi-step scripted workflow: resume the session a -p run persisted
+ID=$(luft -p "step 1: scaffold the module" --json | jq -r .session_id)
+luft -resume "$ID" -p "step 2: write the tests"
+```
+
+In `--json` mode, stdout is a single object (not streamed text):
+
+```json
+{
+  "session_id": "a1b2-...",
+  "result": "the final assistant text…",
+  "usage": {"input_tokens": 1234, "output_tokens": 567, "cache_read_input_tokens": 11000},
+  "tool_calls": [{"name": "bash", "input": {"command": "go test ./..."}, "is_error": false}],
+  "error": null,
+  "exit_code": 0
+}
+```
+
+`session_id` is included so you can chain runs with `-resume`. `tool_calls` records the model's requests (name + input), not the tool outputs (which can be large). `error` is `null` on success; on a max-iter pause it's `"max-iter"` (exit 0, partial work kept and resumable).
+
+| Flag | What it does |
+|---|---|
+| `-p <prompt>` | Run one turn with this prompt and exit. Also triggered by positional args or piped stdin. |
+| `--json` | Emit one JSON object on stdout instead of streaming text. |
+| `--quiet` | Suppress tool-progress lines on stderr. stdout is unaffected. `--json` does not imply `--quiet`. |
+
+**Exit codes:** `0` success or max-iter pause; `1` error; `2` no prompt provided; `130` interrupted. Confirmation prompts are auto-approved in non-interactive mode (a pipe can't answer `y/n`). Scripts that need to distinguish "completed" from "paused at max-iter" should check the JSON `error` field, not the exit code.
+
+stdin is capped at 4 MiB (with a truncation marker if exceeded) so a stray `luft < giant.log` won't OOM. The startup banner is suppressed in non-interactive mode.
+
 ## Things to watch the first time you run it
 
 - **Did the main agent delegate to `explore`?** If it does inspection inline instead of calling `explore`, the system prompt may need tuning. Watch the stderr `[tool ...]` lines.
@@ -256,7 +310,6 @@ The main agent should call `plan` to delegate the design, then summarise back.
 
 ## What's not here yet
 
-- Persistent / resumable sessions across restarts (history dies on exit today)
 - Persistent codebase index across sessions
 - Speculative inspection while the model is drafting
 - OAuth / Claude subscription auth (API key only)
