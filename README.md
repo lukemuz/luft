@@ -1,12 +1,35 @@
 # luft
 
-A Go library for LLM calls, tools, and agent loops. Also a CLI coding agent — `cmd/luft` — built entirely from the library's primitives.
+A CLI coding agent — and the Go library it's built out of.
 
 > Plain data. Plain functions. No framework magic.
 >
 > A library, not a framework. Read the code, not the manual.
 
-`luft` scales from one model call to practical tool-using assistants without forcing a framework-shaped runtime onto simple programs.
+## The CLI
+
+`cmd/luft` is a terminal coding agent in the Claude Code mold: read-only workspace tools, sandboxed bash, a text editor, MCP servers, project memory, session resume. What makes it different is where the tokens go — `explore` and `plan` are subagents on their own (cheaper) models, so a thirty-file investigation burns flash-tier tokens and returns one summary to the main context instead of thirty file reads.
+
+~~~bash
+go install github.com/lukemuz/luft/cmd/luft@latest
+export OPENROUTER_API_KEY=sk-or-...
+cd ~/your-project && luft
+~~~
+
+~~~bash
+# interactive REPL
+> what's the difference between Loop and StepStream?
+
+# one-shot from the shell
+luft "what does main.go do"
+git diff main | luft -p "review this for security issues" --json | jq
+~~~
+
+One static binary, no Node or Python runtime, any OpenRouter model slug. Full usage — models, flags, bash safety modes, subagents, prompt caching, project memory, and the non-interactive / pipe mode — is in [`cmd/luft/README.md`](cmd/luft/README.md).
+
+## The library
+
+The CLI has no private machinery. Every part of it — the loop, the subagents, the toolsets, the confirmation middleware, the context trimming, the JSONL trace — is built from the exported primitives documented below. That is the library's largest dogfooding test, and the reason to read it: if the agent you want is a slightly different shape, you assemble it from the same pieces rather than forking a harness or waiting for a config flag.
 
 Most agent toolkits are frameworks: a runner owns the loop, a session service owns your state, and you assemble behavior through callbacks and services. `luft` is a library instead — history is a `[]Message` you hold, tools are plain Go functions, and the loop is a function you call, so you can always see what's in the context and when the model runs. If you want managed deployment, a vector-backed memory service, or live audio out of the box, a full framework like Google's ADK fits better; `luft` is for when you'd rather read Go than learn a runtime — and ship your agent as a single static binary.
 
@@ -24,7 +47,7 @@ It gives you:
 
 Requires Go 1.21+. The core package has zero external dependencies — every provider (including AWS Bedrock and Vertex AI, whose request signing and auth are written from scratch against the standard library) compiles into your program, so an agent built with `luft` ships as a single static binary: `go build` and deploy it, no runtime or dependency tree to provision.
 
-## Install
+### Install
 
 ~~~bash
 go get github.com/lukemuz/luft
@@ -38,7 +61,7 @@ export OPENAI_API_KEY=sk-...
 export OPENROUTER_API_KEY=sk-or-...
 ~~~
 
-## The smallest useful call
+### The smallest useful call
 
 ~~~go
 client, err := anthropic.NewClientFromEnv(luft.ModelSonnet)
@@ -62,26 +85,17 @@ No hidden session. No runner. `history` is just data.
 
 For a step-by-step walkthrough see [`QUICKSTART.md`](QUICKSTART.md). For the design philosophy see [`VISION.md`](VISION.md).
 
-## The luft CLI — a coding agent built on this library
+## Where luft fits
 
-The repo ships more than a library. `cmd/luft` is a fast, low-cost CLI coding agent — a Claude Code-style assistant with read-only workspace tools, sandboxed bash, an editor, and `explore`/`plan` subagents on cheaper models. It is a real tool, and it is the library's largest dogfooding test: every part of it is built from the primitives documented below.
+The agent loop is about forty lines of Go. That is a fair objection and worth answering directly rather than talking around.
 
-~~~bash
-go install github.com/lukemuz/luft/cmd/luft@latest
-export OPENROUTER_API_KEY=sk-or-...
-cd ~/your-project && luft
-~~~
+**Write the loop yourself** if a single model with a couple of tools is the whole job. You'll be fine, and `Ask` plus a `for` loop is most of `luft` anyway.
 
-~~~bash
-# interactive REPL
-> what's the difference between Loop and StepStream?
+**Take the dependency** for the parts that aren't the loop: provider parity across Anthropic, OpenAI (both endpoints), OpenRouter, Bedrock, and Vertex behind one `Provider` interface; prompt-cache markers that survive translation between them; tool-result ordering when a turn fires four tools at once; context trimming that doesn't split a tool-use from its tool-result; retries that can restart a stream mid-output; and a `Recorder` stream with stable `TurnID`/`Iter`/`Seq` so parallel batches are still orderable after the fact. Those are the parts you rewrite three times.
 
-# one-shot from the shell
-luft "what does main.go do"
-git diff main | luft -p "review this for security issues" --json | jq
-~~~
+**The Go angle is the point.** Go engineers tend to reach for the standard library and a small dependency, not a framework — which is exactly what this is. Zero external dependencies in the core, with Bedrock SigV4 and Vertex auth written by hand against `crypto/*` and `net/http` rather than pulled in as SDKs. The payoff is one static binary: `go build`, `scp`, run. For agents deployed as services that beats a `node_modules` tree or a Python environment outright, and it's why the CLI installs with a single `go install`.
 
-Full usage — models, flags, bash safety modes, subagents, prompt caching, project memory, and the non-interactive / pipe mode — is in [`cmd/luft/README.md`](cmd/luft/README.md).
+**What's deliberately not here.** No skills system, no scheduler, no background runtime, no vector-backed cross-session memory, no managed deployment, no graph executor, no global tool registry. Persistence stops at a five-method `Store` with in-memory and file implementations. These are positioning choices, not gaps waiting to be filled — the moment the library owns your scheduling or your memory service, it owns your control flow, and the reason to pick `luft` is gone. Build them on top; the primitives are exported for exactly that. See [`ROADMAP.md`](ROADMAP.md) for what is planned and what stays out of core.
 
 ## Core building blocks
 
