@@ -119,6 +119,7 @@ import (
 	"github.com/lukemuz/luft/tools/bash"
 	"github.com/lukemuz/luft/tools/batch"
 	"github.com/lukemuz/luft/tools/clock"
+	"github.com/lukemuz/luft/tools/decision"
 	"github.com/lukemuz/luft/tools/editor"
 	"github.com/lukemuz/luft/tools/subagent"
 	"github.com/lukemuz/luft/tools/todo"
@@ -152,6 +153,7 @@ Available tools:
 - web_search (when available): run a web search and get results with citations. Use when you do NOT already have a URL — current library docs, an unfamiliar API, or an error message you want to look up. Pair with web_fetch to read a promising result in full.
 - explore (when available): bounded research specialist that defaults to the ultrafast tier (a small model at very high throughput — extremely fast and cheap) — repo inspection or well-scoped Q&A (provided context, fetched docs, web search, or its own knowledge); returns a concise summary with file dumps and fetches kept out of your context. Lean on it freely and fan several out in parallel.
 - plan (when available): design specialist on the powerful tier, running in a fresh, focused context — get a structured plan before non-trivial multi-file edits, interface changes, or when stuck on a hypothesis
+- decision_model (when available): consult an external model with a self-contained text prompt for a second opinion on a decision. Include all relevant facts, options, constraints, and the desired response format; it has no conversation history or tools. Evaluate its advice before acting.
 - implement (when available): a clone of yourself with the full editing toolset on the medium tier, running in its own clean context — delegate a well-scoped, independently-verifiable change you've already designed and get back a summary of what it did (its edit/test churn stays out of your context). You still review its diff.
 - now: current time
 
@@ -255,6 +257,9 @@ func main() {
 	noImplement := flag.Bool("no-implement", false, "disable only the implement subagent (the editing clone)")
 	noFetch := flag.Bool("no-fetch", false, "disable the native web_fetch tool")
 	noSearch := flag.Bool("no-search", false, "disable the OpenRouter web_search provider tool")
+	decisionModel := flag.String("decision-model", envOr("LUFT_DECISION_MODEL", ""), "enable decision_model with this model id (env: LUFT_DECISION_MODEL)")
+	decisionEndpoint := flag.String("decision-endpoint", envOr("LUFT_DECISION_ENDPOINT", decision.DefaultEndpoint), "full OpenAI-compatible chat completions URL (env: LUFT_DECISION_ENDPOINT)")
+	noDecision := flag.Bool("no-decision", false, "disable decision_model even when configured")
 	bashMode := flag.String("bash", "restricted", "bash safety mode: restricted | standard | unrestricted")
 	shell := flag.String("shell", envOr("LUFT_SHELL", ""), "shell used to run bash commands (default: auto-detect /bin/sh, then sh/bash on PATH; env: LUFT_SHELL)")
 	autoYes := flag.Bool("yes", false, "auto-approve every confirmation prompt")
@@ -347,6 +352,12 @@ func main() {
 	// makeConfirmer: the closure captures autoYes by value.
 	effectiveAutoYes := *autoYes || nonInteractive
 	confirm := makeConfirmer(effectiveAutoYes, sp, os.Stdin, os.Stderr)
+
+	decisionTools, err := configureDecision(*decisionModel, *decisionEndpoint, os.Getenv("LUFT_DECISION_API_KEY"), *noDecision)
+	if err != nil {
+		log.Fatal(err)
+	}
+	decisionTools = decisionTools.Wrap(luft.WithResultLimit(64*1024), luft.WithLogging(logger))
 
 	// Summarizer for /compact, automatic in-loop trimming, and oversized-
 	// result compression. Defaults to glm-5.2 (the main-tier model); override
@@ -599,6 +610,7 @@ func main() {
 		mcpTools,
 		todo.New().Toolset(),
 		webTools,
+		decisionTools,
 		luft.Tools(subagentBindings...),
 	)
 	if err != nil {
@@ -611,6 +623,7 @@ func main() {
 			editTools,
 			todo.New().Toolset(),
 			webTools,
+			decisionTools,
 			luft.Tools(subagentBindings...),
 		)
 		if err != nil {
