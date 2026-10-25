@@ -114,10 +114,39 @@ Why three agents? Cost tiering and context isolation. The main GLM model decides
 | `now` | Current time | no |
 | `explore(task)` | Delegate inspection to a gemini-3.5-flash-backed subagent | no |
 | `plan(task)` | Delegate hard reasoning to a glm-5.2-backed subagent | no |
+| `decision_model(prompt)` | One text request to a configured external decision/reasoning model | no |
 
 `Glob` and `Grep` use the same names Claude Code uses, so the model recognises them immediately. `web_fetch` is a native Go tool (no external dependency, no API key) that downloads a URL, strips scripts/styles, decodes entities, and paginates long pages via `max_length` + `start_index`. Disable it with `-no-fetch`. `web_search` is OpenRouter's hosted search tool — executed server-side and returned inline with citations, so it works regardless of the underlying model slug and needs no extra API key beyond your OpenRouter one. Disable it with `-no-search`. The two pair naturally: `web_search` to find a source, `web_fetch` to read it in full.
 
 The `explore` and `plan` subagents are themselves agents with their own toolsets — the main agent can ask them anything within their scope.
+
+## External decision model (optional)
+
+Enable `decision_model` by setting a model ID and a separate API key. The
+default endpoint is Baseten's OpenAI-compatible Model API:
+
+```bash
+export LUFT_DECISION_API_KEY="$BASETEN_API_KEY"
+export LUFT_DECISION_MODEL='your-model-slug'
+luft
+```
+
+Use a model slug available in your Baseten account. For another service with
+OpenAI-compatible chat completions and Bearer authentication, set
+`LUFT_DECISION_ENDPOINT` to its **full** chat completions URL (including
+`/v1/chat/completions`) and `LUFT_DECISION_API_KEY` to its key. Custom Baseten
+`/predict` request formats are not supported.
+
+The main agent supplies a self-contained `prompt` string with the question,
+facts, options, and constraints. The tool sends it as one user message and
+returns the model's text; it has no tools, project memory, or conversation
+history. Prompt text is sent to the configured service. Calls time out after
+120 seconds, are not retried, and may incur provider charges. The CLI session
+token totals cover the agent's calls, not this separate model request.
+
+Flags `-decision-model` and `-decision-endpoint` override their environment
+variables. Without a decision model ID the tool is absent; `-no-decision`
+disables it even when configured. It remains available with `-no-subagents`.
 
 ## Context economy
 
@@ -157,6 +186,9 @@ A good `AGENTS.md` is short and concrete: project conventions, how to run tests,
 | `-no-subagents` | false | Disable the explore and plan tools |
 | `-no-fetch` | false | Disable the native `web_fetch` tool |
 | `-no-search` | false | Disable the OpenRouter `web_search` provider tool |
+| `-decision-model` | (off) | Enable `decision_model` with this model ID (env: `LUFT_DECISION_MODEL`; key: `LUFT_DECISION_API_KEY`) |
+| `-decision-endpoint` | Baseten chat completions URL | Full OpenAI-compatible endpoint URL (env: `LUFT_DECISION_ENDPOINT`) |
+| `-no-decision` | false | Disable the decision tool even when configured |
 | `-bash` | `restricted` | `restricted` \| `standard` \| `unrestricted` |
 | `-yes` | false | Auto-approve every confirmation prompt |
 | `-max-iter` | 30 | Max model calls per user turn |
